@@ -137,6 +137,7 @@ struct Connected {
     heartbeats_left: u8,
     last_button_counter: Option<(u8, Instant)>,
     profile_id: Option<String>,
+    host_id: [u8; 8],
 }
 
 struct Session {
@@ -147,6 +148,13 @@ struct Session {
     workers: Arc<Mutex<Vec<JoinHandle<()>>>>,
     /// Set when a command ends `connect` early (`Error::Interrupted`).
     interrupt: Option<Flow>,
+    /// UDP 53220: the scanner broadcasts "computer X was picked on the panel" here.
+    select_notices: Option<UdpSocket>,
+    /// The panel picked this computer while a session was up; the next connect
+    /// must run the pairing-mode handshake.
+    handshake_due: bool,
+    /// When the last handshake ran; the scanner repeats each notice several times.
+    last_handshake: Option<Instant>,
 }
 
 enum Flow {
@@ -164,6 +172,9 @@ impl Session {
             rx,
             workers: Arc::new(Mutex::new(Vec::new())),
             interrupt: None,
+            select_notices: None,
+            handshake_due: false,
+            last_handshake: None,
         }
     }
 
@@ -328,11 +339,21 @@ impl Session {
         let mut scsi = ScsiChannel::open(info.ip, host)?;
         scsi.inquiry()?;
         ctl.announce(&identity.user_id, NOTIFY_PORT)?;
-        let mut st = register_retrying(&ctl, &mut scsi, &host_id)?;
+        if self.select_notices.is_none() {
+            self.select_notices = bind_select_notices();
+        }
+        let _ = self.selection_notice(info.ip); // drop stale notices
+        let mut st = if std::mem::take(&mut self.handshake_due) {
+            self.run_handshake(&ctl, &mut scsi, &identity)?
+        } else {
+            register_retrying(&ctl, &mut scsi, &host_id)?
+        };
         let mut users = users;
         if st == NOT_SELECTED {
             // Stay online so the panel offers this computer, until someone selects it.
-            match self.wait_for_selection(&info, &ctl, &mut scsi, &heartbeat, &host_id, &identity)? {
+            match self.wait_for_selection(
+                &info, &ctl, &mut scsi, &heartbeat, &notify, &host_id, &identity,
+            )? {
                 Some(code) => st = code,
                 None => return Err(Error::Interrupted),
             }
@@ -364,24 +385,64 @@ impl Session {
             heartbeats_left: 0,
             last_button_counter: None,
             profile_id,
+            host_id,
         })
+    }
+
+    /// Runs the pairing-mode handshake ScanSnap Home runs when its computer is
+    /// picked on the panel, and returns the final register result.
+    fn run_handshake(
+        &mut self,
+        ctl: &Control,
+        scsi: &mut ScsiChannel,
+        identity: &Identity,
+    ) -> Result<i32> {
+        let trace = std::env::var_os("FEATHER_TRACE").is_some();
+        let h = pairing::handshake(ctl, scsi, identity, false, &|m| {
+            if trace {
+                eprintln!("handshake: {m}");
+            }
+        })?;
+        if trace {
+            eprintln!("handshake: register -> {}", h.connect_code);
+        }
+        self.last_handshake = Some(Instant::now());
+        Ok(h.connect_code)
+    }
+
+    /// The host ID in the latest "computer picked on the panel" notice, if any.
+    fn selection_notice(&self, scanner: Ipv4Addr) -> Option<[u8; 8]> {
+        let sock = self.select_notices.as_ref()?;
+        let mut buf = [0u8; 256];
+        let mut picked = None;
+        while let Ok((n, from)) = sock.recv_from(&mut buf) {
+            let d = &buf[..n];
+            crate::proto::wire::trace(&format!("udp53220 {from} <<"), d);
+            let from_scanner = matches!(from.ip(), std::net::IpAddr::V4(ip) if ip == scanner);
+            if from_scanner && n >= 40 && &d[4..8] == b"ssNR" && be32(d, 8) == NOTICE_SELECTED {
+                picked = Some(d[32..40].try_into().unwrap());
+            }
+        }
+        picked
     }
 
     /// Keeps a standby session (C2 polling, announces, heartbeat) like ScanSnap Home
     /// does while another computer is selected; the panel shows hosts without one as
     /// unavailable. Returns the register result once this computer is selected, or
     /// None when a command (stop, pair, new settings) interrupts; see `self.interrupt`.
+    #[allow(clippy::too_many_arguments)]
     fn wait_for_selection(
         &mut self,
         info: &ScannerInfo,
         ctl: &Control,
         scsi: &mut ScsiChannel,
         heartbeat: &UdpSocket,
+        notify: &UdpSocket,
         host_id: &[u8; 8],
         identity: &Identity,
     ) -> Result<Option<i32>> {
         let msg = format!(
-            "Select \"{}\" on the scanner's screen to use Feather Scan.",
+            "On the scanner's screen, tap the person icon and pick \"{}\".",
             identity.user_name
         );
         self.status(State::NotPaired, msg.clone(), Some(info));
@@ -409,17 +470,34 @@ impl Session {
                         return Ok(None);
                     }
                 }
-                Ok(Cmd::ScanNow) => self.emit(Event::Error { message: msg.clone() }),
+                Ok(Cmd::ScanNow) => self.emit(Event::Error {
+                    message: msg.clone(),
+                }),
                 Err(RecvTimeoutError::Timeout) => {}
             }
             let hw = scsi.hw_status()?;
+            let mut buf = [0u8; 256];
+            while let Ok((n, from)) = notify.recv_from(&mut buf) {
+                crate::proto::wire::trace(&format!("udp {from} <<"), &buf[..n]);
+            }
+            if std::env::var_os("FEATHER_TRACE").is_some() {
+                eprintln!(
+                    "standby: c2 state {:#04x} selected {}",
+                    hw.state,
+                    crate::proto::wire::hex(&hw.selected_host)
+                );
+            }
+            // Picked on the panel: the scanner broadcasts 0x23 naming us, and C2
+            // shows our host ID. It then waits for the pairing-mode handshake.
+            let picked = self.selection_notice(info.ip) == Some(*host_id);
             let selected = hw.selected_host == *host_id;
-            if selected || last_register.elapsed() >= Duration::from_secs(15) {
+            if (picked || selected) && last_register.elapsed() >= Duration::from_secs(2) {
                 last_register = Instant::now();
-                let st = register_retrying(ctl, scsi, host_id)?;
-                if st != NOT_SELECTED {
+                let st = self.run_handshake(ctl, scsi, identity)?;
+                if st >= 0 {
                     return Ok(Some(st));
                 }
+                last_announce = Instant::now();
             }
             if last_announce.elapsed() >= ANNOUNCE_EVERY {
                 last_announce = Instant::now();
@@ -482,7 +560,26 @@ impl Session {
                 return Flow::Reconnect;
             }
         };
+        if (status.state, status.selected_host) != (last.state, last.selected_host)
+            && std::env::var_os("FEATHER_TRACE").is_some()
+        {
+            eprintln!(
+                "c2 state {:#04x} selected {}",
+                status.state,
+                crate::proto::wire::hex(&status.selected_host)
+            );
+        }
         *last = status;
+        // Someone picked another computer on the panel (or is picking one): the scanner
+        // has dropped this session. Start over, which waits until we're selected again.
+        if status.state == STATE_UNREGISTERED || status.selected_host != c.host_id {
+            self.status(
+                State::Connecting,
+                "The scanner's selected computer changed",
+                Some(&c.info),
+            );
+            return Flow::Reconnect;
+        }
         if c.last_announce.elapsed() >= ANNOUNCE_EVERY {
             c.last_announce = Instant::now();
             if let Err(e) =
@@ -517,6 +614,19 @@ impl Session {
         {
         }
 
+        if let Some(id) = self.selection_notice(c.info.ip) {
+            // Someone picked a computer on the panel. If it's us again, the scanner
+            // wants the pairing-mode handshake; otherwise it has dropped us.
+            // Repeats of the notice that led to our last handshake are ignored.
+            let repeat = id == c.host_id
+                && self
+                    .last_handshake
+                    .is_some_and(|t| t.elapsed() < Duration::from_secs(15));
+            if !repeat {
+                self.handshake_due = id == c.host_id;
+                return Flow::Reconnect;
+            }
+        }
         if let Some(counter) = poll_button(c) {
             let dup = c
                 .last_button_counter
@@ -629,6 +739,23 @@ impl Session {
     }
 }
 
+/// UDP 53220 notice: a computer was picked on the touch panel (host ID at 32).
+const NOTICE_SELECTED: u32 = 0x23;
+
+fn be32(b: &[u8], off: usize) -> u32 {
+    u32::from_be_bytes(b[off..off + 4].try_into().unwrap())
+}
+
+fn bind_select_notices() -> Option<UdpSocket> {
+    let s = UdpSocket::bind(("0.0.0.0", crate::proto::wire::SCANNER_NOTICE_PORT)).ok()?;
+    s.set_nonblocking(true).ok()?;
+    let _ = s.set_broadcast(true);
+    Some(s)
+}
+
+/// C2 state byte when no host is registered.
+const STATE_UNREGISTERED: u8 = 0x80;
+
 /// 0x11 answer while the panel has another computer selected.
 const NOT_SELECTED: i32 = -7;
 
@@ -653,6 +780,7 @@ fn poll_button(c: &mut Connected) -> Option<u8> {
     let mut pressed = None;
     while let Ok((n, from)) = c.notify.recv_from(&mut buf) {
         let d = &buf[..n];
+        crate::proto::wire::trace(&format!("udp {from} <<"), d);
         let from_scanner = matches!(from.ip(), std::net::IpAddr::V4(ip) if ip == c.info.ip);
         if n >= 20
             && &d[4..8] == b"ssNR"

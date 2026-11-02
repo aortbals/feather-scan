@@ -12,6 +12,8 @@ pub const SCSI_PORT: u16 = 53218;
 pub const CONTROL_PORT: u16 = 53219;
 pub const DISCOVERY_PORT: u16 = 52217;
 pub const NOTIFY_PORT: u16 = 55265;
+/// The scanner broadcasts state notices here (power-on, computer picked on the panel).
+pub const SCANNER_NOTICE_PORT: u16 = 53220;
 
 /// Connects and consumes the 16-byte greeting the scanner sends first.
 pub fn connect(ip: Ipv4Addr, port: u16, timeout: Duration) -> Result<TcpStream> {
@@ -74,7 +76,7 @@ pub fn read_response(s: &mut TcpStream) -> Result<Response> {
     })
 }
 
-fn trace(dir: &str, b: &[u8]) {
+pub fn trace(dir: &str, b: &[u8]) {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *ON.get_or_init(|| std::env::var_os("FEATHER_TRACE").is_some()) {
         eprintln!("{dir} [{}] {}", b.len(), hex(&b[..b.len().min(96)]));

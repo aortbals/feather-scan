@@ -16,7 +16,7 @@ All integers are big-endian unless noted. There is no TLS or cryptography.
 | 53218 | TCP | host → scanner | SCSI tunnel (status polling, scanning); kept open |
 | 53219 | TCP | host → scanner | control channel; one request per connection |
 | 55265 | UDP | scanner → host | button notice (the port the host registered) |
-| 53220 | UDP | scanner → broadcast | power-on notice |
+| 53220 | UDP | scanner → broadcast | power-on notice; "computer picked on the panel" (0x23) |
 
 ScanSnap Home sends discovery from UDP 55264 and listens for the button on 55265.
 
@@ -137,40 +137,71 @@ A reply without JSON is an acknowledgement: u32 status at body offset 8
 (0 = ok). 0x0110 answers 0xffffffff when it rejects the list, and a call sent
 in the wrong state gets an error frame (negative code at header offset 8).
 
-### Pairing (0x0110)
+### Pairing and the panel's computer switch
 
-Pairing adds a computer ("user") and its profiles to the scanner. The sequence,
-from scansnack's iX1500 captures and live tests, with the SCSI tunnel open and
-C2 polled throughout:
+The scanner keeps a list of computers ("users") and the profiles of the
+computer selected on the touch panel. The profiles belong to that computer:
+whenever a computer is picked on the panel, it pushes its own profiles to the
+scanner.
 
-1. 0x13, 0x41/0x0100, 0x30, 0x12, 0x11 with intent 5. C2 byte 16 becomes 0xe1.
-2. 0x41/0x0210, 0x41/0x0100, then 0x41/0x0110 with the whole list, then 0x41/0x0210.
-3. Leave the pairing state: 0x30, 0x12, 0x11 with intent 0. Without this the
+**The pairing-mode handshake.** ScanSnap Home runs it when its computer is
+picked on the panel (captured on the iX1600), and scansnack used the same
+steps to add a computer on the iX1500. The SCSI tunnel stays open and C2 is
+polled throughout:
+
+1. 53218: INQUIRY, VPD f0, E7.
+2. 53219: 0x13, 0x41/0x0100, 0x41/0x0210, 0x12, then 0x11 with intent 5.
+   C2 byte 16 becomes 0xe1.
+3. 0x41/0x0100, then 0x41/0x0110 with the whole list.
+4. Leave the pairing state: 0x12, 0x11 with intent 0, 0x30. Without this the
    scanner stays at 0xe1 and refuses normal sessions (0x11/0 → -4, 0x0610 → -2).
 
-The 0x0110 JSON has the same shape as the 0x0100 reply
-(`conn_user.users`, `conn_user.select`, `profiles`, `version`). Rules:
+**0x0110 rules.** The JSON has the same shape as the 0x0100 reply:
+`conn_user.users`, `conn_user.select`, `profiles` and `version`.
 
 - It replaces the list, so read 0x0100 first and send everything back.
   Feather Scan copies the reply and only adds or replaces its own user and
   profile, keeping every unknown field and the key order.
 - Keep the user order and `select` unchanged, or the scanner answers
   0xffffffff. `select` can only be changed on the touch panel.
-- User names are at most 30 characters (31 is rejected).
-- A user entry: `name`, `app_ver` 1, `prof_stat` 1, `scloud_user` "",
-  `host_id` (16 hex chars, made up by the host), `icon_id`, `color_id`.
-- A profile: copy of an existing profile with a new `prof_id` (32 hex chars),
-  the host's `user_id` (32 hex chars, made up by the host), `user_name`,
-  `host_address` (the host's IP) and a `disp_order` after the others.
+- User names are at most 30 characters; 31 is rejected.
+- A user entry has `name`, `app_ver` 1, `prof_stat` 1, `scloud_user` "",
+  `host_id` (16 hex chars, made up by the host), `icon_id` and `color_id`.
+- A profile has a `prof_id` (32 hex chars), the host's `user_id` (32 hex chars,
+  made up by the host), `user_name`, `host_address` (the host's IP),
+  `disp_order` and the scan settings (`scan_info`, `feed`, …).
 - 0x0610 is refused while pairing; profiles are selected later, before scans.
 
-Afterwards the person selects the new computer on the touch panel. Until then
-0x11 intent 0 answers -7 (not selected). After a switch on the panel, 0x0100
-returns only the selected computer's profiles, so profiles of other computers
-can't be read back and may not survive a later 0x0110.
+**Picking a computer on the panel.** Open the computer list with the person
+icon in the panel's corner. Then:
+
+1. The scanner sends the connected host `ssNR` command 0x11 (byte 16 = 0x0a)
+   on UDP. C2 goes to state 0xd0, with the selected host `ff…ff`, and the
+   current session is dropped (C2 state 0x80).
+2. After a computer is picked, the scanner broadcasts on **UDP 53220**,
+   several times, a 48-byte notice:
+   `u32 0x30 | "ssNR" | u32 0x23 | u32 0 | u8 seq | 3 zero | scanner IP |
+   scanner MAC | 2 zero | picked host ID (8) | zero`.
+   The panel shows "waiting for the computer to connect".
+3. The picked host must run the pairing-mode handshake above. During it,
+   0x0100 lists no profiles, so the host writes back `conn_user` unchanged
+   plus its own profiles. ScanSnap Home sends `conn_user`, `version`,
+   `profiles`, in that order.
+4. A host that only sends 0x11 with intent 0 gets accepted (C2 0xe0), but the
+   panel times out with "The device is not responding".
+
+Other 53220 notices use command 0x30 with byte 16 counting up. Feather Scan
+ignores them.
+
+**Adding a new computer.** While another computer is selected, run the
+handshake and add only the user entry, leaving the profiles as they are.
+Until the new computer is picked on the panel, 0x11 with intent 0 answers -7
+(not selected), and the panel lists it but can't use it unless the host keeps
+a live session: C2 polling, an announce every 10 s and the heartbeat.
 
 Feather Scan saves the 0x0100 reply to
-`~/Library/Application Support/Feather Scan/backups/` before every 0x0110.
+`~/Library/Application Support/Feather Scan/backups/` before every pairing
+write.
 
 ## SCSI tunnel (53218)
 

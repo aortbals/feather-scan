@@ -147,7 +147,7 @@ private struct ScannerSettings: View {
         .confirmationDialog("Pair with the scanner?", isPresented: $confirmPair) {
             Button("Pair") { model.pair() }
         } message: {
-            Text("Adds this Mac as a computer on the scanner, keeping every computer and profile already there. Afterwards, select it on the scanner's screen. A copy of the scanner's list is saved in ~/Library/Application Support/Feather Scan/backups.")
+            Text("Adds this Mac as a computer on the scanner, keeping every computer and profile already there. Afterwards, tap the person icon on the scanner's screen and pick this Mac. A copy of the scanner's list is saved in ~/Library/Application Support/Feather Scan/backups.")
         }
     }
 

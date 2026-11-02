@@ -40,7 +40,7 @@ pub struct Paired {
 impl Paired {
     pub fn instructions(&self) -> String {
         format!(
-            "Paired. On the scanner's screen, select \"{}\" as the computer.",
+            "Paired. On the scanner's screen, tap the person icon and pick \"{}\".",
             self.identity.user_name
         )
     }
@@ -99,16 +99,12 @@ fn hex_lower(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-fn new_prof_id() -> Result<String> {
-    let mut b = [0u8; 16];
-    random(&mut b)?;
-    Ok(hex_lower(&b).to_uppercase())
-}
-
 /// Builds the list to write back: everything in `current` (every user, every
 /// profile, every field, `select` and `version` untouched), plus our user and
 /// profile. If we are already in the list, our entries are replaced in place;
-/// the scanner rejects a reordered user list.
+/// the scanner rejects a reordered user list. The listed profiles belong to the
+/// computer selected on the panel, so ours is only added when that is us (or
+/// the list is empty, as it is during the handshake after a panel switch).
 ///
 /// Returns the new list and our profile ID.
 pub fn merge(
@@ -157,6 +153,11 @@ pub fn merge(
         None => users.push(Value::Object(user)),
     }
 
+    let selected_is_us = conn_user
+        .get("select")
+        .and_then(|s| s["id"].as_str())
+        .is_some_and(|id| id == me.host_id);
+
     let profiles = root
         .entry("profiles")
         .or_insert_with(|| json!([]))
@@ -168,6 +169,11 @@ pub fn merge(
     let prof_id = mine
         .and_then(|i| profiles[i]["prof_id"].as_str().map(String::from))
         .unwrap_or_else(|| new_prof_id.to_string());
+    // The listed profiles belong to the computer selected on the panel. Don't add
+    // ours to another computer's; it is pushed when this computer is selected.
+    if mine.is_none() && !selected_is_us && !profiles.is_empty() {
+        return Ok((out, prof_id));
+    }
     let base = mine
         .map(|i| profiles[i].clone())
         .or_else(|| first_by_order(profiles))
@@ -278,12 +284,9 @@ pub fn save_backup(list: &Value) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Pairs this computer with the scanner at `scanner`.
-///
-/// Sequence (as ScanSnap Home and scansnack do it): 0x13 → 0x0100 → 0x30 → 0x12 →
-/// 0x11 (intent 5) → 0x0210 → 0x0110 → 0x30 → 0x12 → 0x11 (intent 0), with the SCSI
-/// channel open and polled throughout. Nobody else may hold the scanner meanwhile.
-/// The list read before the write is saved with [`save_backup`] first.
+/// Pairs this computer with the scanner at `scanner`: adds our user and profile
+/// to the scanner's list. Nobody else may hold the scanner meanwhile. The list
+/// read before the write is saved with [`save_backup`] first.
 pub fn pair(scanner: Ipv4Addr, me: &Identity, log: &dyn Fn(&str)) -> Result<Paired> {
     let host_id = control::parse_host_id(&me.host_id)
         .ok_or_else(|| Error::Config(format!("bad host id {}", me.host_id)))?;
@@ -293,13 +296,50 @@ pub fn pair(scanner: Ipv4Addr, me: &Identity, log: &dyn Fn(&str)) -> Result<Pair
     }
     let ctl = Control::new(scanner, host);
     let mut scsi = ScsiChannel::open(scanner, host)?;
+    let h = handshake(&ctl, &mut scsi, me, true, log);
+    ctl.unregister_quietly();
+    drop(scsi);
+    let h = h?;
+    Ok(Paired {
+        identity: me.clone(),
+        profile_id: h.profile_id,
+        connect_code: h.connect_code,
+        backup: h.backup,
+    })
+}
+
+pub struct Handshake {
+    pub profile_id: String,
+    /// Result of the final 0x11 intent 0 (negative: not selected on the panel).
+    pub connect_code: i32,
+    pub backup: Option<PathBuf>,
+}
+
+/// The pairing-mode handshake, as ScanSnap Home runs it when its computer is
+/// picked on the touch panel (captured) and, with the same steps, when it pairs:
+///
+/// 53218 INQUIRY, then 53219: 0x13 → 0x0100 → 0x0210 → 0x12 → 0x11 (intent 5) →
+/// 0x0100 → 0x0110 → 0x12 → 0x11 (intent 0) → 0x30.
+///
+/// The 0x0110 write keeps every user and every profile the scanner reports and
+/// adds or refreshes ours. While pairing, the scanner reports only the selected
+/// computer's profiles (none, right after a panel switch): each computer pushes
+/// its own profiles when it is selected.
+pub fn handshake(
+    ctl: &Control,
+    scsi: &mut ScsiChannel,
+    me: &Identity,
+    backup: bool,
+    log: &dyn Fn(&str),
+) -> Result<Handshake> {
+    let host_id = control::parse_host_id(&me.host_id)
+        .ok_or_else(|| Error::Config(format!("bad host id {}", me.host_id)))?;
     scsi.inquiry()?;
     let _ = scsi.hw_status();
-
     let name = ctl.device_name()?;
     log(&format!("Pairing with {name} as \"{}\"…", me.user_name));
     let _ = ctl.read_users()?;
-    let _ = ctl.state();
+    ctl.announce(&me.user_id, NOTIFY_PORT)?;
     ctl.unregister_quietly();
     // The scanner answers -4 (busy) for a while after another session ends.
     let mut st = ctl.register(INTENT_PAIR, &host_id, NOTIFY_PORT)?;
@@ -316,8 +356,9 @@ pub fn pair(scanner: Ipv4Addr, me: &Identity, log: &dyn Fn(&str)) -> Result<Pair
             "scanner refused to pair ({st}). Quit ScanSnap Home and other scanner apps, then try again."
         )));
     }
-    let hw = scsi.hw_status()?;
-    if hw.state != STATE_PAIRING {
+    if let Ok(hw) = scsi.hw_status()
+        && hw.state != STATE_PAIRING
+    {
         log(&format!(
             "note: scanner state is {:#04x}, expected {STATE_PAIRING:#04x}",
             hw.state
@@ -325,38 +366,57 @@ pub fn pair(scanner: Ipv4Addr, me: &Identity, log: &dyn Fn(&str)) -> Result<Pair
     }
 
     let result = (|| {
-        ctl.announce(&me.user_id, NOTIFY_PORT)?;
-        // Read again right before writing, so the write is based on the latest list.
         let current = ctl.read_users()?;
         if !current.is_object() {
             return Err(proto("scanner sent no user list; nothing was changed"));
         }
-        let backup = save_backup(&current)?;
-        log(&format!("Saved the scanner's list to {}", backup.display()));
-        let (list, prof_id) = merge(&current, me, host.ip, &new_prof_id()?)?;
+        let saved = if backup {
+            let path = save_backup(&current)?;
+            log(&format!("Saved the scanner's list to {}", path.display()));
+            Some(path)
+        } else {
+            None
+        };
+        let host_ip = ctl.host.ip;
+        let (list, prof_id) = merge(&current, me, host_ip, &profile_id_for(&me.user_id))?;
         ctl.write_users(&list)?;
-        let _ = scsi.hw_status();
-        let _ = ctl.announce(&me.user_id, NOTIFY_PORT);
-        Ok((prof_id, backup))
+        Ok((prof_id, saved))
     })();
 
     // Always leave the pairing state, or the scanner refuses normal sessions.
-    let _ = ctl.state();
-    ctl.unregister_quietly();
-    let connect_code = ctl
-        .register(INTENT_CONNECT, &host_id, NOTIFY_PORT)
-        .unwrap_or(-1);
     let _ = scsi.hw_status();
     ctl.unregister_quietly();
-    drop(scsi);
-
+    let mut connect_code = ctl
+        .register(INTENT_CONNECT, &host_id, NOTIFY_PORT)
+        .unwrap_or(-1);
+    if connect_code == -4 {
+        std::thread::sleep(Duration::from_millis(300));
+        connect_code = ctl
+            .register(INTENT_CONNECT, &host_id, NOTIFY_PORT)
+            .unwrap_or(-1);
+    }
+    let _ = ctl.state();
     let (profile_id, backup) = result?;
-    Ok(Paired {
-        identity: me.clone(),
+    Ok(Handshake {
         profile_id,
         connect_code,
-        backup: Some(backup),
+        backup,
     })
+}
+
+/// Our profile's ID, derived from the user ID so it stays the same every time
+/// we push it (the scanner forgets it whenever another computer is selected).
+pub fn profile_id_for(user_id: &str) -> String {
+    let fnv = |seed: u64| {
+        user_id.bytes().chain(*b"/profile").fold(seed, |h, b| {
+            (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    };
+    format!(
+        "{:016X}{:016X}",
+        fnv(0xcbf2_9ce4_8422_2325),
+        fnv(0x8422_2325_cbf2_9ce4)
+    )
 }
 
 #[cfg(test)]
@@ -419,22 +479,48 @@ mod tests {
         }
     }
 
+    /// `sample()` with this computer selected on the panel.
+    fn sample_selected() -> Value {
+        let mut v = sample();
+        v["conn_user"]["select"]["id"] = json!(me().host_id);
+        v
+    }
+
     #[test]
     fn merge_keeps_every_existing_entry_and_field() {
-        let before = sample();
-        let (after, prof_id) = merge(&before, &me(), ip(), "NEWPROF").unwrap();
-        assert_eq!(prof_id, "NEWPROF");
-        assert_contains(&before, &after, "$");
-        let users = after["conn_user"]["users"].as_array().unwrap();
-        assert_eq!(users.len(), 3);
+        for before in [sample(), sample_selected()] {
+            let (after, prof_id) = merge(&before, &me(), ip(), "NEWPROF").unwrap();
+            assert_eq!(prof_id, "NEWPROF");
+            assert_contains(&before, &after, "$");
+            let users = after["conn_user"]["users"].as_array().unwrap();
+            assert_eq!(users.len(), 3);
+            assert_eq!(after["conn_user"]["select"], before["conn_user"]["select"]);
+        }
+    }
+
+    #[test]
+    fn merge_adds_no_profile_to_another_computers_list() {
+        let (after, _) = merge(&sample(), &me(), ip(), "NEWPROF").unwrap();
+        assert_eq!(after["conn_user"]["users"].as_array().unwrap().len(), 3);
+        assert_eq!(after["profiles"], sample()["profiles"]);
+    }
+
+    #[test]
+    fn merge_after_panel_switch_pushes_only_our_profile() {
+        // While pairing right after a panel switch, the scanner lists no profiles.
+        let mut v = sample_selected();
+        v["profiles"] = json!([]);
+        let (after, _) = merge(&v, &me(), ip(), "P").unwrap();
         let profiles = after["profiles"].as_array().unwrap();
-        assert_eq!(profiles.len(), 3);
-        assert_eq!(after["conn_user"]["select"], before["conn_user"]["select"]);
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0]["user_id"], me().user_id);
+        assert_eq!(profiles[0]["prof_id"], "P");
+        assert_contains(&v["conn_user"], &after["conn_user"], "$.conn_user");
     }
 
     #[test]
     fn merge_appends_our_user_and_profile() {
-        let (after, _) = merge(&sample(), &me(), ip(), "NEWPROF").unwrap();
+        let (after, _) = merge(&sample_selected(), &me(), ip(), "NEWPROF").unwrap();
         let u = &after["conn_user"]["users"][2];
         assert_eq!(u["name"], "Feather Scan@test");
         assert_eq!(u["host_id"], "0123456789abcdef");
@@ -456,14 +542,14 @@ mod tests {
 
     #[test]
     fn merge_again_replaces_our_entries_in_place() {
-        let (once, _) = merge(&sample(), &me(), ip(), "FIRST").unwrap();
+        let (once, _) = merge(&sample_selected(), &me(), ip(), "FIRST").unwrap();
         let (twice, prof_id) = merge(&once, &me(), Ipv4Addr::new(10, 0, 0, 9), "SECOND").unwrap();
         assert_eq!(prof_id, "FIRST", "keeps our existing profile ID");
         assert_eq!(twice["conn_user"]["users"].as_array().unwrap().len(), 3);
         assert_eq!(twice["profiles"].as_array().unwrap().len(), 3);
         assert_eq!(twice["profiles"][2]["host_address"], "10.0.0.9");
         assert_eq!(twice["profiles"][2]["disp_order"], 3);
-        assert_contains(&sample(), &twice, "$");
+        assert_contains(&sample_selected(), &twice, "$");
     }
 
     #[test]
@@ -512,6 +598,18 @@ mod tests {
     #[test]
     fn merge_rejects_non_object() {
         assert!(merge(&Value::Null, &me(), ip(), "N").is_err());
+    }
+
+    #[test]
+    fn profile_id_is_stable_hex() {
+        let a = profile_id_for(&me().user_id);
+        assert_eq!(a, profile_id_for(&me().user_id));
+        assert_eq!(a.len(), 32);
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase())
+        );
+        assert_ne!(a, profile_id_for("OTHER"));
     }
 
     #[test]

@@ -50,8 +50,8 @@ Early, but in daily use. Tested on a **ScanSnap iX1600** (firmware 0V00).
    **Notifications** when macOS asks.
 3. **Pair.** If ScanSnap Home already paired this Mac, Feather Scan reuses
    that pairing. Otherwise open **Settings → Scanner**, click
-   **Pair with Scanner**, then select "Feather Scan@<this Mac>" on the
-   scanner's screen. Pairing adds this Mac to the scanner's list of computers
+   **Pair with Scanner**. Then, on the scanner's screen, tap the person icon
+   in the corner and pick "Feather Scan@<this Mac>". Pairing adds this Mac to the scanner's list of computers
    and keeps everything already there; a copy of the old list is saved in
    `~/Library/Application Support/Feather Scan/backups`.
 4. **Optional:** in **Settings → Smart Titles**, add an API key. It's stored in
@@ -162,11 +162,11 @@ docs/protocol.md      the Wi-Fi protocol
 
 ## Known gaps
 
-- **Pairing is new.** It follows the sequence ScanSnap Home uses and keeps
-  every computer and profile on the scanner, but it has been tested on few
-  scanners. The scanner only reports the profiles of the computer selected on
-  its panel, so profiles of other computers can't be seen and may not survive
-  pairing; if one goes missing, open ScanSnap Home on that computer to restore it.
+- **Pairing is new.** It follows the steps ScanSnap Home uses, and keeps
+  every computer on the scanner, but it has only been tested on one iX1600.
+  The panel shows the profiles of the selected computer only; each computer
+  sends its own when it's picked, so switching back to a ScanSnap Home
+  computer brings its profiles back.
 - **Paper-edge detection needs contrast.** It looks for paper that is brighter
   than the scanner's light-gray background. Grayish paper keeps the full scan
   width.
