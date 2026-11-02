@@ -13,6 +13,8 @@ typedef void (*feather_event_cb)(const char *json, void *ctx);
 void *feather_start(const char *config_json, feather_event_cb callback, void *ctx);
 bool feather_set_config(void *handle, const char *config_json);
 void feather_scan_now(void *handle);
+/// Pairs with the scanner without ScanSnap Home; results arrive as `identity`/`paired`/`error` events.
+void feather_pair(void *handle);
 void feather_stop(void *handle);
 char *feather_discover(const char *ip, uint32_t timeout_ms);
 char *feather_default_config(void);

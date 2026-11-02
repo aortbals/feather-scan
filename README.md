@@ -44,12 +44,16 @@ Early, but in daily use. Tested on a **ScanSnap iX1600** (firmware 0V00).
 
 ## Getting started
 
-1. **Pair once with ScanSnap Home** and select this Mac on the scanner's
-   screen. Feather Scan reuses that pairing (see [Known gaps](#known-gaps)).
-2. **Quit ScanSnap Home** and turn off its login item. Only one app can hold
-   the scanner at a time.
-3. **Build and open** Feather Scan (below). Allow **Local Network** and
+1. **Quit ScanSnap Home** if you have it, and turn off its login item. Only
+   one app can hold the scanner at a time.
+2. **Build and open** Feather Scan (below). Allow **Local Network** and
    **Notifications** when macOS asks.
+3. **Pair.** If ScanSnap Home already paired this Mac, Feather Scan reuses
+   that pairing. Otherwise open **Settings → Scanner**, click
+   **Pair with Scanner**, then select "Feather Scan@<this Mac>" on the
+   scanner's screen. Pairing adds this Mac to the scanner's list of computers
+   and keeps everything already there; a copy of the old list is saved in
+   `~/Library/Application Support/Feather Scan/backups`.
 4. **Optional:** in **Settings → Smart Titles**, add an API key. It's stored in
    your Keychain. The recognized text of each scan is sent to that endpoint.
 5. Put paper in the scanner and press **Scan**.
@@ -88,6 +92,8 @@ target/release/feather discover                  # find scanners on the network
 target/release/feather run --ip 192.168.1.50     # wait for the Scan button, print events as JSON
 target/release/feather scan --ip 192.168.1.50    # scan what's in the feeder now
 target/release/feather pdf page1.jpg page2.jpg   # offline: JPEGs → searchable PDF
+target/release/feather pair --ip 192.168.1.50 --dry-run  # show the list pairing would write
+target/release/feather pair --ip 192.168.1.50    # pair without ScanSnap Home (quit the app first)
 ```
 
 - **Config:** read from `~/Library/Application Support/Feather Scan/config.json`.
@@ -156,8 +162,11 @@ docs/protocol.md      the Wi-Fi protocol
 
 ## Known gaps
 
-- **No pairing of its own yet.** Feather Scan needs a pairing that ScanSnap
-  Home made once.
+- **Pairing is new.** It follows the sequence ScanSnap Home uses and keeps
+  every computer and profile on the scanner, but it has been tested on few
+  scanners. The scanner only reports the profiles of the computer selected on
+  its panel, so profiles of other computers can't be seen and may not survive
+  pairing; if one goes missing, open ScanSnap Home on that computer to restore it.
 - **Paper-edge detection needs contrast.** It looks for paper that is brighter
   than the scanner's light-gray background. Grayish paper keeps the full scan
   width.

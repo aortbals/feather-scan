@@ -72,6 +72,14 @@ final class AppModel: ObservableObject {
 
     func scanNow() { core.scanNow() }
 
+    /// Pairs this computer with the scanner without ScanSnap Home.
+    func pair() {
+        isPairing = true
+        core.pair()
+    }
+
+    @Published private(set) var isPairing = false
+
     /// Saves settings and hands them to the running core.
     func apply(_ newConfig: CoreConfig, apiKey: String?) {
         config = newConfig
@@ -131,8 +139,12 @@ final class AppModel: ObservableObject {
             var body = "\(scan.pages) page\(scan.pages == 1 ? "" : "s")"
             if let err = e["title_error"] as? String { body += " · no smart title (\(err))" }
             notifier.post(title: scan.title, body: body, path: scan.path)
+        case "paired":
+            isPairing = false
+            notifier.post(title: "Paired with the scanner", body: e["message"] as? String ?? "", path: nil)
         case "error":
             activity = nil
+            isPairing = false
             notifier.post(title: "Feather Scan", body: e["message"] as? String ?? "Something went wrong", path: nil)
         case "identity":
             if let raw = e["identity"],

@@ -128,10 +128,49 @@ Response body (right after the 16-byte header): `u32 length | u16 sub | 10 zero 
 | Sub | Meaning |
 |---|---|
 | 0x0100 | read `conn_user` (users + `select`) and `profiles` |
-| 0x0110 | write users and profiles (replaces the list) |
+| 0x0110 | write users and profiles (replaces the list; only while pairing) |
 | 0x0200 | read the profile the user tapped on the panel |
 | 0x0210 | announce host: `host_address`, `function_level` 2, `current_user_id`, `host_port`, `version` 1 |
 | 0x0610 | select profile |
+
+A reply without JSON is an acknowledgement: u32 status at body offset 8
+(0 = ok). 0x0110 answers 0xffffffff when it rejects the list, and a call sent
+in the wrong state gets an error frame (negative code at header offset 8).
+
+### Pairing (0x0110)
+
+Pairing adds a computer ("user") and its profiles to the scanner. The sequence,
+from scansnack's iX1500 captures and live tests, with the SCSI tunnel open and
+C2 polled throughout:
+
+1. 0x13, 0x41/0x0100, 0x30, 0x12, 0x11 with intent 5. C2 byte 16 becomes 0xe1.
+2. 0x41/0x0210, 0x41/0x0100, then 0x41/0x0110 with the whole list, then 0x41/0x0210.
+3. Leave the pairing state: 0x30, 0x12, 0x11 with intent 0. Without this the
+   scanner stays at 0xe1 and refuses normal sessions (0x11/0 → -4, 0x0610 → -2).
+
+The 0x0110 JSON has the same shape as the 0x0100 reply
+(`conn_user.users`, `conn_user.select`, `profiles`, `version`). Rules:
+
+- It replaces the list, so read 0x0100 first and send everything back.
+  Feather Scan copies the reply and only adds or replaces its own user and
+  profile, keeping every unknown field and the key order.
+- Keep the user order and `select` unchanged, or the scanner answers
+  0xffffffff. `select` can only be changed on the touch panel.
+- User names are at most 30 characters (31 is rejected).
+- A user entry: `name`, `app_ver` 1, `prof_stat` 1, `scloud_user` "",
+  `host_id` (16 hex chars, made up by the host), `icon_id`, `color_id`.
+- A profile: copy of an existing profile with a new `prof_id` (32 hex chars),
+  the host's `user_id` (32 hex chars, made up by the host), `user_name`,
+  `host_address` (the host's IP) and a `disp_order` after the others.
+- 0x0610 is refused while pairing; profiles are selected later, before scans.
+
+Afterwards the person selects the new computer on the touch panel. Until then
+0x11 intent 0 answers -7 (not selected). After a switch on the panel, 0x0100
+returns only the selected computer's profiles, so profiles of other computers
+can't be read back and may not survive a later 0x0110.
+
+Feather Scan saves the 0x0100 reply to
+`~/Library/Application Support/Feather Scan/backups/` before every 0x0110.
 
 ## SCSI tunnel (53218)
 

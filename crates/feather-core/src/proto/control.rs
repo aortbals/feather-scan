@@ -77,18 +77,34 @@ impl Control {
         let json = payload
             .map(|v| serde_json::to_vec_pretty(v).unwrap())
             .unwrap_or_default();
-        let mut body = Vec::with_capacity(20 + json.len());
-        body.extend_from_slice(&((16 + json.len()) as u32).to_be_bytes());
-        body.extend_from_slice(&sub.to_be_bytes());
-        body.extend_from_slice(&[0; 10]);
-        body.extend_from_slice(&(json.len() as u32).to_le_bytes());
-        body.extend_from_slice(&json);
-        let r = self.call(CMD_JSON, &body)?;
+        let r = self.call(CMD_JSON, &json_request(sub, &json))?;
         parse_json_reply(&r.body)
     }
 
     pub fn read_users(&self) -> Result<Value> {
         self.json(SUB_READ_USERS, None)
+    }
+
+    /// 0x41/0x0110: replaces the scanner's whole user and profile list with `list`.
+    /// Only accepted while pairing (after 0x11 intent 5). Build `list` from a fresh
+    /// `read_users` (see `pairing::merge`) so nothing already there is lost.
+    pub fn write_users(&self, list: &Value) -> Result<()> {
+        let json = serde_json::to_vec_pretty(list).unwrap();
+        let r = self.call(CMD_JSON, &json_request(SUB_WRITE_USERS, &json))?;
+        if r.code < 0 {
+            return Err(proto(format!("scanner refused the user list ({})", r.code)));
+        }
+        match ack_status(&r.body) {
+            0 => Ok(()),
+            s => Err(proto(format!(
+                "scanner rejected the user list (status {s:#010x})"
+            ))),
+        }
+    }
+
+    /// 0x12 is not always answered; ScanSnap Home sends it while pairing regardless.
+    pub fn unregister_quietly(&self) {
+        let _ = self.unregister();
     }
 
     pub fn read_tapped_profile(&self) -> Result<Value> {
@@ -114,6 +130,26 @@ impl Control {
         self.json(SUB_ANNOUNCE, Some(&v))?;
         Ok(())
     }
+}
+
+/// Request body: `u32 len of rest | u16 sub | 10 zero | u32 LE json len | json`.
+fn json_request(sub: u16, json: &[u8]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(20 + json.len());
+    body.extend_from_slice(&((16 + json.len()) as u32).to_be_bytes());
+    body.extend_from_slice(&sub.to_be_bytes());
+    body.extend_from_slice(&[0; 10]);
+    body.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    body.extend_from_slice(json);
+    body
+}
+
+/// A reply without JSON is an acknowledgement: u32 status at body offset 8 (0 = ok,
+/// 0xffffffff = rejected). A reply with no room for it counts as ok.
+fn ack_status(body: &[u8]) -> u32 {
+    if body.len() >= 20 && u32::from_le_bytes(body[16..20].try_into().unwrap()) != 0 {
+        return 0; // JSON reply, not an ack
+    }
+    body.get(8..12).map(|b| be32(b, 0)).unwrap_or(0)
 }
 
 /// Reply body: `u32 len | u16 sub | 10 zero | u32 LE json len | json` (JSON at offset 20).

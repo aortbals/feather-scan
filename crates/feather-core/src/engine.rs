@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::config::{Config, Identity};
 use crate::error::{Error, Result};
 use crate::net::HostAddr;
+use crate::pairing;
 use crate::pipeline::{self, ScannedImage};
 use crate::proto::control::{self, Control, INTENT_CONNECT};
 use crate::proto::discovery::{self, ScannerInfo};
@@ -52,9 +53,14 @@ pub enum Event {
     Error {
         message: String,
     },
-    /// Identity adopted from the scanner; the app should persist it.
+    /// Identity adopted from the scanner or made by pairing; the app should persist it.
     Identity {
         identity: Identity,
+    },
+    /// Pairing finished; `message` tells the person to select this computer on the panel.
+    Paired {
+        identity: Identity,
+        message: String,
     },
 }
 
@@ -74,6 +80,7 @@ pub type EventSink = Arc<dyn Fn(Event) + Send + Sync>;
 
 enum Cmd {
     ScanNow,
+    Pair,
     Config(Box<Config>),
     Stop,
 }
@@ -98,6 +105,12 @@ impl Engine {
 
     pub fn scan_now(&self) {
         let _ = self.tx.send(Cmd::ScanNow);
+    }
+
+    /// Pairs this computer with the scanner without ScanSnap Home. Ends the current
+    /// session, then emits `Identity` and a status asking to select it on the panel.
+    pub fn pair(&self) {
+        let _ = self.tx.send(Cmd::Pair);
     }
 
     pub fn set_config(&self, cfg: Config) {
@@ -137,6 +150,7 @@ struct Session {
 enum Flow {
     Continue,
     Reconnect,
+    Pair,
     Stop,
 }
 
@@ -173,8 +187,13 @@ impl Session {
                     );
                     let flow = self.serve(&mut c);
                     let _ = Control::new(c.info.ip, c.host).unregister();
-                    if matches!(flow, Flow::Stop) {
-                        break;
+                    match flow {
+                        Flow::Stop => break,
+                        Flow::Pair => {
+                            self.pair();
+                            continue;
+                        }
+                        _ => {}
                     }
                 }
                 Err(Error::Config(m)) => self.status(State::NotPaired, m, None),
@@ -183,6 +202,7 @@ impl Session {
             // Wait before retrying, but stay responsive to commands.
             match self.rx.recv_timeout(RETRY_AFTER) {
                 Ok(Cmd::Stop) | Err(RecvTimeoutError::Disconnected) => break,
+                Ok(Cmd::Pair) => self.pair(),
                 Ok(Cmd::Config(c)) => self.cfg = *c,
                 Ok(Cmd::ScanNow) => self.emit(Event::Error {
                     message: "Scanner is not connected".into(),
@@ -194,6 +214,44 @@ impl Session {
             let _ = h.join();
         }
         self.status(State::Stopped, "Stopped", None);
+    }
+
+    /// Pairs with the scanner (no session may be open), then persists the new identity.
+    fn pair(&mut self) {
+        let info = match self.find_scanner() {
+            Ok(i) => i,
+            Err(e) => {
+                self.emit(Event::Error {
+                    message: format!("Pairing failed: {e}"),
+                });
+                return;
+            }
+        };
+        self.status(
+            State::Connecting,
+            format!("Pairing with {}…", info.name),
+            Some(&info),
+        );
+        // Give the scanner a moment after the session we just ended.
+        std::thread::sleep(Duration::from_secs(1));
+        let result = pairing::identity_for_pairing(self.cfg.identity.as_ref())
+            .and_then(|me| pairing::pair(info.ip, &me, &|_| {}));
+        match result {
+            Ok(p) => {
+                self.cfg.identity = Some(p.identity.clone());
+                self.emit(Event::Identity {
+                    identity: p.identity.clone(),
+                });
+                self.emit(Event::Paired {
+                    identity: p.identity.clone(),
+                    message: p.instructions(),
+                });
+                self.status(State::NotPaired, p.instructions(), Some(&info));
+            }
+            Err(e) => self.emit(Event::Error {
+                message: format!("Pairing failed: {e}"),
+            }),
+        }
     }
 
     fn find_scanner(&self) -> Result<ScannerInfo> {
@@ -240,7 +298,7 @@ impl Session {
             None => {
                 let id = adopt_identity(&users).ok_or_else(|| {
                     Error::Config(
-                        "This computer isn't paired with the scanner. Pair it once with ScanSnap Home, then select it on the scanner's screen.".into(),
+                        "This computer isn't paired with the scanner. Use Pair with Scanner in Settings (or `feather pair`), then select it on the scanner's screen.".into(),
                     )
                 })?;
                 self.cfg.identity = Some(id.clone());
@@ -315,6 +373,7 @@ impl Session {
                         return Flow::Reconnect;
                     }
                 }
+                Ok(Cmd::Pair) => return Flow::Pair,
                 Err(RecvTimeoutError::Timeout) => {}
             }
             match self.tick(c, &mut last_status) {
