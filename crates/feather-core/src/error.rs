@@ -14,6 +14,8 @@ pub enum Error {
     Ocr(String),
     Llm(String),
     Config(String),
+    /// A command (stop, pair, new settings) ended the operation early.
+    Interrupted,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -29,6 +31,7 @@ impl fmt::Display for Error {
             Error::Ocr(m) => write!(f, "OCR failed: {m}"),
             Error::Llm(m) => write!(f, "title generation failed: {m}"),
             Error::Config(m) => write!(f, "config: {m}"),
+            Error::Interrupted => write!(f, "interrupted"),
         }
     }
 }

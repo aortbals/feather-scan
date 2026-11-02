@@ -145,6 +145,8 @@ struct Session {
     rx: Receiver<Cmd>,
     /// PDF jobs run here so the scanner is free for the next batch.
     workers: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    /// Set when a command ends `connect` early (`Error::Interrupted`).
+    interrupt: Option<Flow>,
 }
 
 enum Flow {
@@ -161,6 +163,7 @@ impl Session {
             sink,
             rx,
             workers: Arc::new(Mutex::new(Vec::new())),
+            interrupt: None,
         }
     }
 
@@ -196,6 +199,14 @@ impl Session {
                         _ => {}
                     }
                 }
+                Err(Error::Interrupted) => match self.interrupt.take() {
+                    Some(Flow::Stop) => break,
+                    Some(Flow::Pair) => {
+                        self.pair();
+                        continue;
+                    }
+                    _ => continue,
+                },
                 Err(Error::Config(m)) => self.status(State::NotPaired, m, None),
                 Err(e) => self.status(State::Offline, e.to_string(), None),
             }
@@ -317,15 +328,16 @@ impl Session {
         let mut scsi = ScsiChannel::open(info.ip, host)?;
         scsi.inquiry()?;
         ctl.announce(&identity.user_id, NOTIFY_PORT)?;
-        // The scanner answers -4 (busy) for a while after another session ends.
-        let mut st = ctl.register(INTENT_CONNECT, &host_id, NOTIFY_PORT)?;
-        for _ in 0..10 {
-            if st >= 0 {
-                break;
+        let mut st = register_retrying(&ctl, &mut scsi, &host_id)?;
+        let mut users = users;
+        if st == NOT_SELECTED {
+            // Stay online so the panel offers this computer, until someone selects it.
+            match self.wait_for_selection(&info, &ctl, &mut scsi, &heartbeat, &host_id, &identity)? {
+                Some(code) => st = code,
+                None => return Err(Error::Interrupted),
             }
-            std::thread::sleep(Duration::from_secs(2));
-            let _ = scsi.hw_status();
-            st = ctl.register(INTENT_CONNECT, &host_id, NOTIFY_PORT)?;
+            // Only the selected computer's profiles are listed; ours are visible now.
+            users = ctl.read_users().unwrap_or(users);
         }
         if st < 0 {
             return Err(Error::Protocol(format!(
@@ -353,6 +365,81 @@ impl Session {
             last_button_counter: None,
             profile_id,
         })
+    }
+
+    /// Keeps a standby session (C2 polling, announces, heartbeat) like ScanSnap Home
+    /// does while another computer is selected; the panel shows hosts without one as
+    /// unavailable. Returns the register result once this computer is selected, or
+    /// None when a command (stop, pair, new settings) interrupts; see `self.interrupt`.
+    fn wait_for_selection(
+        &mut self,
+        info: &ScannerInfo,
+        ctl: &Control,
+        scsi: &mut ScsiChannel,
+        heartbeat: &UdpSocket,
+        host_id: &[u8; 8],
+        identity: &Identity,
+    ) -> Result<Option<i32>> {
+        let msg = format!(
+            "Select \"{}\" on the scanner's screen to use Feather Scan.",
+            identity.user_name
+        );
+        self.status(State::NotPaired, msg.clone(), Some(info));
+        let mut last_announce = Instant::now();
+        let mut last_register = Instant::now();
+        let mut last_heartbeat = Instant::now() - HEARTBEAT_EVERY;
+        let mut heartbeats_left = 0u8;
+        heartbeat.set_nonblocking(true)?;
+        loop {
+            match self.rx.recv_timeout(POLL) {
+                Ok(Cmd::Stop) | Err(RecvTimeoutError::Disconnected) => {
+                    self.interrupt = Some(Flow::Stop);
+                    return Ok(None);
+                }
+                Ok(Cmd::Pair) => {
+                    self.interrupt = Some(Flow::Pair);
+                    return Ok(None);
+                }
+                Ok(Cmd::Config(cfg)) => {
+                    let reconnect =
+                        cfg.scanner_ip != self.cfg.scanner_ip || cfg.identity != self.cfg.identity;
+                    self.cfg = *cfg;
+                    if reconnect {
+                        self.interrupt = Some(Flow::Reconnect);
+                        return Ok(None);
+                    }
+                }
+                Ok(Cmd::ScanNow) => self.emit(Event::Error { message: msg.clone() }),
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+            let hw = scsi.hw_status()?;
+            let selected = hw.selected_host == *host_id;
+            if selected || last_register.elapsed() >= Duration::from_secs(15) {
+                last_register = Instant::now();
+                let st = register_retrying(ctl, scsi, host_id)?;
+                if st != NOT_SELECTED {
+                    return Ok(Some(st));
+                }
+            }
+            if last_announce.elapsed() >= ANNOUNCE_EVERY {
+                last_announce = Instant::now();
+                ctl.announce(&identity.user_id, NOTIFY_PORT)?;
+            }
+            if last_heartbeat.elapsed() >= HEARTBEAT_EVERY {
+                last_heartbeat = Instant::now();
+                heartbeats_left = 3;
+            }
+            if heartbeats_left > 0 {
+                heartbeats_left -= 1;
+                let reply_port = heartbeat.local_addr().map(|a| a.port()).unwrap_or(0);
+                let _ = heartbeat.send_to(
+                    &discovery::heartbeat(&ctl.host, reply_port),
+                    (info.ip, DISCOVERY_PORT),
+                );
+            }
+            let mut drain = [0u8; 64];
+            while heartbeat.recv_from(&mut drain).is_ok() {}
+        }
     }
 
     fn serve(&mut self, c: &mut Connected) -> Flow {
@@ -540,6 +627,24 @@ impl Session {
         w.retain(|h| !h.is_finished());
         w.push(handle);
     }
+}
+
+/// 0x11 answer while the panel has another computer selected.
+const NOT_SELECTED: i32 = -7;
+
+/// 0x11 intent 0. The scanner answers -4 (busy) for a while after another session
+/// ends, or right after pairing; retry those.
+fn register_retrying(ctl: &Control, scsi: &mut ScsiChannel, host_id: &[u8; 8]) -> Result<i32> {
+    let mut st = ctl.register(INTENT_CONNECT, host_id, NOTIFY_PORT)?;
+    for _ in 0..10 {
+        if st != -4 {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(2));
+        let _ = scsi.hw_status();
+        st = ctl.register(INTENT_CONNECT, host_id, NOTIFY_PORT)?;
+    }
+    Ok(st)
 }
 
 /// Returns the button counter when a scan-button notice is waiting.
