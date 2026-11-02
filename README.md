@@ -11,7 +11,7 @@ a folder you choose. That's the whole job.
 
 | | ScanSnap Home | Feather Scan |
 |---|---|---|
-| App size | 529 MB | 2.1 MB |
+| App size | 529 MB | 3.7 MB |
 | Memory while idle | several helper processes | ~20–26 MB, one process |
 | CPU while idle | — | ~0% |
 
