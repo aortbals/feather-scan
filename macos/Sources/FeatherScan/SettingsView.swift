@@ -14,7 +14,6 @@ struct SettingsView: View {
                 .tabItem { Label("Scanner", systemImage: "scanner") }
         }
         .frame(width: 500)
-        .onAppear { NSApp.activate(ignoringOtherApps: true) }
     }
 }
 

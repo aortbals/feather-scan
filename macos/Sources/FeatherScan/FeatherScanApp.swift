@@ -20,6 +20,7 @@ struct FeatherScanApp: App {
 
 struct MenuContent: View {
     @ObservedObject var model: AppModel
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         Text(model.activity ?? model.message)
@@ -44,9 +45,24 @@ struct MenuContent: View {
             }
         }
         Divider()
-        SettingsLink { Text("Settings…") }
+        Button("Settings…") { showSettings() }
             .keyboardShortcut(",")
         Button("Quit Feather Scan") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
+    }
+}
+
+extension MenuContent {
+    /// A menu bar app isn't active when its menu is used, so a newly opened (or
+    /// already open) Settings window would sit behind other apps' windows.
+    /// Open it, then bring the app and the window to the front once the menu has closed.
+    func showSettings() {
+        openSettings()
+        DispatchQueue.main.async {
+            NSApp.activate()
+            let window = NSApp.windows.first { $0.identifier?.rawValue == "com_apple_SwiftUI_Settings_window" }
+            window?.makeKeyAndOrderFront(nil)
+            window?.orderFrontRegardless()
+        }
     }
 }
