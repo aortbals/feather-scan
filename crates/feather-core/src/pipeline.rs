@@ -23,6 +23,12 @@ pub struct Timings {
     pub analyze_ms: u64,
     /// Clean-up and OCR, all pages (runs in parallel).
     pub pages_ms: u64,
+    /// Summed over pages: decode, crop, clean-up and encode.
+    pub prep_ms: u64,
+    /// Summed over pages: text recognition.
+    pub ocr_ms: u64,
+    /// Slowest single page's text recognition.
+    pub ocr_max_ms: u64,
     pub title_ms: u64,
     pub write_ms: u64,
     pub total_ms: u64,
@@ -44,6 +50,8 @@ struct Processed {
     geometry: PageGeometry,
     ocr: OcrPage,
     blank: bool,
+    prep_ms: u64,
+    ocr_ms: u64,
 }
 
 /// Runs the current thread at user-initiated priority (macOS), so a scan the
@@ -121,6 +129,9 @@ pub fn process(images: Vec<ScannedImage>, cfg: &Config, engine: &dyn OcrEngine) 
         pages.push(s.expect("every image processed")?);
     }
     timings.pages_ms = t.elapsed().as_millis() as u64;
+    timings.prep_ms = pages.iter().map(|p| p.prep_ms).sum();
+    timings.ocr_ms = pages.iter().map(|p| p.ocr_ms).sum();
+    timings.ocr_max_ms = pages.iter().map(|p| p.ocr_ms).max().unwrap_or(0);
 
     let mut removed = 0;
     if cfg.remove_blank_pages && pages.iter().any(|p| !p.blank) {
@@ -170,8 +181,16 @@ fn process_one(img: &ScannedImage, analysis: &Analysis, cfg: &Config, engine: &d
     let skip_ocr = analysis.blank && img.back;
     if !cfg.clean_pages {
         // Keep the scanner's JPEG untouched; crop and deskew happen in the PDF.
+        let t = Instant::now();
         let ocr = if skip_ocr { OcrPage::default() } else { ocr::recognize_oriented(engine, &img.jpeg)? };
-        return Ok(Processed { jpeg: img.jpeg.clone(), geometry: analysis.geometry, ocr, blank: analysis.blank });
+        return Ok(Processed {
+            jpeg: img.jpeg.clone(),
+            geometry: analysis.geometry,
+            ocr,
+            blank: analysis.blank,
+            prep_ms: 0,
+            ocr_ms: t.elapsed().as_millis() as u64,
+        });
     }
     // Straighten and crop the pixels, clean them up, and OCR the result.
     let debug = std::env::var_os("FEATHER_DEBUG").is_some();
@@ -208,6 +227,8 @@ fn process_one(img: &ScannedImage, analysis: &Analysis, cfg: &Config, engine: &d
         geometry: PageGeometry::full(page.w as f64, page.h as f64, img.dpi),
         ocr,
         blank: analysis.blank,
+        prep_ms: t_encode.as_millis() as u64,
+        ocr_ms: (t.elapsed() - t_encode).as_millis() as u64,
     })
 }
 
