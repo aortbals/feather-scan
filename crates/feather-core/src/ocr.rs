@@ -35,6 +35,17 @@ impl OcrPage {
             .join("\n")
     }
 
+    /// Boxes as seen on the image after rotating it 180°.
+    pub fn flip_180(&mut self) {
+        for line in &mut self.lines {
+            for w in line.iter_mut() {
+                w.x = 1.0 - w.x - w.w;
+                w.y = 1.0 - w.y - w.h;
+            }
+        }
+        self.upside_down = false;
+    }
+
     fn score(&self) -> f64 {
         let chars: usize = self
             .lines
@@ -53,11 +64,16 @@ pub trait OcrEngine: Send + Sync {
 
 /// Runs OCR upright, and again upside down if the first pass found little.
 pub fn recognize_oriented(engine: &dyn OcrEngine, jpeg: &[u8]) -> Result<OcrPage> {
-    let up = engine.recognize(jpeg, false)?;
+    // One retry covers a request cancelled by the watchdog; after that the page
+    // is saved without a text layer rather than failing the whole document.
+    let up = match engine.recognize(jpeg, false).or_else(|_| engine.recognize(jpeg, false)) {
+        Ok(p) => p,
+        Err(_) => return Ok(OcrPage::default()),
+    };
     if up.confidence >= 0.6 && up.score() > 40.0 {
         return Ok(up);
     }
-    let down = engine.recognize(jpeg, true)?;
+    let Ok(down) = engine.recognize(jpeg, true) else { return Ok(up) };
     Ok(if down.score() > up.score() * 1.5 {
         down
     } else {
@@ -100,6 +116,13 @@ mod vision {
 
     pub struct VisionOcr;
 
+    const OCR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+    #[derive(Clone, Copy)]
+    struct SendPtr(*mut VNRecognizeTextRequest);
+    // Only used to call `cancel`, which Vision documents as callable from another thread.
+    unsafe impl Send for SendPtr {}
+
     impl OcrEngine for VisionOcr {
         fn recognize(&self, jpeg: &[u8], upside_down: bool) -> Result<OcrPage> {
             autoreleasepool(|_| recognize(jpeg, upside_down))
@@ -126,12 +149,35 @@ mod vision {
         request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
         request.setUsesLanguageCorrection(true);
         request.setAutomaticallyDetectsLanguage(true);
+
         let as_request: Retained<VNRequest> =
             Retained::into_super(Retained::into_super(request.clone()));
         let requests: Retained<NSArray<VNRequest>> = NSArray::from_retained_slice(&[as_request]);
-        handler
-            .performRequests_error(&requests)
-            .map_err(|e| Error::Ocr(e.localizedDescription().to_string()))?;
+        // Watchdog: Vision can stall when the Neural Engine is busy with
+        // system work; cancel a request that takes far too long.
+        let done = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let req_ptr = SendPtr(Retained::as_ptr(&request) as *mut VNRecognizeTextRequest);
+        let watchdog = {
+            let done = done.clone();
+            std::thread::spawn(move || {
+                let (lock, cv) = &*done;
+                let guard = lock.lock().unwrap();
+                let (guard, timeout) = cv.wait_timeout_while(guard, OCR_TIMEOUT, |d| !*d).unwrap();
+                if timeout.timed_out() && !*guard {
+                    let p = req_ptr;
+                    // The request outlives this thread: we join it below before releasing it.
+                    unsafe { (*p.0).cancel() };
+                }
+            })
+        };
+        let result = handler.performRequests_error(&requests);
+        {
+            let (lock, cv) = &*done;
+            *lock.lock().unwrap() = true;
+            cv.notify_all();
+        }
+        let _ = watchdog.join();
+        result.map_err(|e| Error::Ocr(e.localizedDescription().to_string()))?;
 
         let mut page = OcrPage {
             upside_down,

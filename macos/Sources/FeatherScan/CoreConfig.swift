@@ -7,6 +7,8 @@ struct CoreConfig: Codable, Equatable {
     var scan: Scan
     var usePanelSettings: Bool
     var removeBlankPages: Bool
+    /// nil = core default (on). Optional so settings saved by older versions still load.
+    var cleanPages: Bool?
     var llm: LLM
     var identity: Identity?
 

@@ -48,6 +48,9 @@ pub enum Event {
         pages: usize,
         removed_blank: usize,
         title_error: Option<String>,
+        timings: crate::pipeline::Timings,
+        /// From the Scan press to the last sheet received.
+        scan_ms: u64,
     },
     Error {
         message: String,
@@ -163,6 +166,8 @@ impl Session {
     }
 
     fn run(mut self) {
+        // Scans are user-initiated work; don't let macOS treat them as background.
+        pipeline::prioritize_current_thread();
         loop {
             match self.connect() {
                 Ok(mut c) => {
@@ -402,6 +407,7 @@ impl Session {
                 let _ = Control::new(c.info.ip, c.host).select_profile(id);
             }
         }
+        let scan_started = Instant::now();
         self.emit(Event::ScanStarted {
             source: source.into(),
         });
@@ -444,7 +450,7 @@ impl Session {
             Ok(_) => {}
         }
         if !images.is_empty() {
-            self.spawn_pipeline(images);
+            self.spawn_pipeline(images, scan_started.elapsed().as_millis() as u64);
         }
         if matches!(flow, Flow::Continue) {
             self.status(
@@ -456,7 +462,7 @@ impl Session {
         flow
     }
 
-    fn spawn_pipeline(&self, images: Vec<ScannedImage>) {
+    fn spawn_pipeline(&self, images: Vec<ScannedImage>, scan_ms: u64) {
         let cfg = self.cfg.clone();
         let sink = self.sink.clone();
         let handle = std::thread::spawn(move || {
@@ -471,6 +477,8 @@ impl Session {
                     pages: s.pages,
                     removed_blank: s.removed_blank,
                     title_error: s.title_error,
+                    timings: s.timings,
+                    scan_ms,
                 }),
                 Err(e) => sink(Event::Error {
                     message: format!("Couldn't save the PDF: {e}"),

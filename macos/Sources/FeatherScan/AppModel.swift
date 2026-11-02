@@ -43,6 +43,8 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var menuBarIcon = FeatherIcon.still(dimmed: true)
     private var iconTimer: Timer?
+    /// Held while a scan runs, so macOS doesn't nap or sleep the app mid-job.
+    private var workToken: NSObjectProtocol?
     private var iconFrame = 0
 
     /// A scan is feeding paper or its PDF is being made.
@@ -50,6 +52,13 @@ final class AppModel: ObservableObject {
 
     /// Animates the feather while a scan runs; dims it while the scanner is unreachable.
     private func updateIcon() {
+        if isWorking, workToken == nil {
+            workToken = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .idleSystemSleepDisabled], reason: "Scanning and saving a document")
+        } else if !isWorking, let token = workToken {
+            ProcessInfo.processInfo.endActivity(token)
+            workToken = nil
+        }
         if isWorking {
             guard iconTimer == nil else { return }
             iconTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 12, repeats: true) { [weak self] _ in
@@ -128,6 +137,9 @@ final class AppModel: ObservableObject {
             recent.insert(scan, at: 0)
             recent = Array(recent.prefix(8))
             if let data = try? JSONEncoder().encode(recent) { UserDefaults.standard.set(data, forKey: "recent") }
+            if let t = e["timings"] as? [String: Any] {
+                NSLog("Feather Scan: saved \(scan.pages) pages; scan \(e["scan_ms"] ?? "?") ms, timings \(t)")
+            }
             var body = "\(scan.pages) page\(scan.pages == 1 ? "" : "s")"
             if let err = e["title_error"] as? String { body += " · no smart title (\(err))" }
             notifier.post(title: scan.title, body: body, path: scan.path)

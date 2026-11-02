@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod engine;
+pub mod enhance;
 pub mod error;
 pub mod ffi;
 pub mod imaging;

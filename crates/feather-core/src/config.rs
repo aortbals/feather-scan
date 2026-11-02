@@ -17,6 +17,9 @@ pub struct Config {
     /// Use resolution, color and duplex from the profile tapped on the touch panel.
     pub use_panel_settings: bool,
     pub remove_blank_pages: bool,
+    /// Straighten, crop and clean up page images (whiter paper, crisper text).
+    /// Off keeps the scanner's original JPEGs.
+    pub clean_pages: bool,
     pub llm: LlmConfig,
     /// The pairing this computer uses on the scanner. Filled in automatically
     /// from an existing ScanSnap Home pairing for this computer.
@@ -53,6 +56,7 @@ impl Default for Config {
             scan: ScanSettings::default(),
             use_panel_settings: true,
             remove_blank_pages: true,
+            clean_pages: true,
             llm: LlmConfig::default(),
             identity: None,
         }

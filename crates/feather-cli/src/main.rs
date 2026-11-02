@@ -141,6 +141,11 @@ fn main() {
                                     .join(" ")
                             };
                             println!("cols: {}\nrows: {}", fmt(&c), fmt(&r));
+                            for f in [0.3, 0.5, 0.7] {
+                                let row = feather_core::imaging::debug_row(&jpeg, f).unwrap();
+                                let n = row.len();
+                                println!("row{f}: L {:?} … R {:?}", &row[..24], &row[n - 24..]);
+                            }
                         }
                     }
                     Err(e) => println!("{p}: {e}"),

@@ -34,6 +34,8 @@ private struct GeneralSettings: View {
                 }
             }
             Toggle("Remove blank back sides", isOn: binding(\.removeBlankPages))
+            Toggle("Clean up page images", isOn: cleanBinding)
+                .help("Straighten, crop and whiten pages for crisper text. Off keeps the scanner's original images.")
             Toggle("Open at login", isOn: $launchAtLogin)
                 .onChange(of: launchAtLogin) { _, v in model.launchAtLogin = v }
         }
@@ -52,6 +54,14 @@ private struct GeneralSettings: View {
             c.outputDir = url.path
             model.apply(c, apiKey: Keychain.apiKey())
         }
+    }
+
+    private var cleanBinding: Binding<Bool> {
+        Binding(get: { model.config.cleanPages ?? true }, set: { v in
+            var c = model.config
+            c.cleanPages = v
+            model.apply(c, apiKey: Keychain.apiKey())
+        })
     }
 
     private func binding(_ path: WritableKeyPath<CoreConfig, Bool>) -> Binding<Bool> {

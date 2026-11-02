@@ -20,9 +20,11 @@ a folder you choose. That's the whole job.
 - **Searchable PDFs.** Text is recognized with Apple's Vision framework and
   stored as an invisible text layer. It works in Preview, Spotlight, PDFKit and
   poppler, and any Unicode text survives copy and paste.
-- **High quality, no re-compression.** Each page keeps the scanner's original
-  JPEG. Cropping to the paper and straightening skewed pages are applied as PDF
-  transforms, so no pixels are re-encoded.
+- **Clean, straight pages.** Each page is cropped to the paper and
+  straightened, the paper is turned white and the text darker and crisper,
+  all at the scanner's full resolution. Turn off "Clean up page images" in
+  Settings to keep the scanner's original JPEGs untouched instead (crop and
+  deskew are then applied as PDF transforms, without re-encoding).
 - **Blank pages removed.** Empty back sides of double-sided scans are dropped.
 - **Smart file names.** Any OpenAI-compatible endpoint (host + key, OpenAI by
   default) names each scan, for example
@@ -117,7 +119,8 @@ The core holds a session the way ScanSnap Home does:
 
 On a press, it runs the scan sequence, collects one JPEG per side, and passes
 the pages to the pipeline: find the paper and skew → recognize text → drop
-blank backs → ask the LLM for a title → write the PDF.
+blank backs → crop, straighten and clean each page → ask the LLM for a title
+→ write the PDF.
 
 ### The protocol
 
@@ -144,6 +147,7 @@ crates/feather-core   Rust core (staticlib + rlib)
   scanner.rs          scan sequence
   engine.rs           background session: keep-alive, Scan button, jobs
   imaging.rs          paper edges, skew, blank detection
+  enhance.rs          crop, deskew and clean-up of page pixels
   ocr.rs              Vision OCR (macOS)
   pdf/                PDF writer and the glyphless font behind the text layer
   title.rs            OpenAI-compatible titling
@@ -158,9 +162,9 @@ docs/protocol.md      the Wi-Fi protocol
 
 - **No pairing of its own yet.** Feather Scan needs a pairing that ScanSnap
   Home made once.
-- **Paper-edge detection needs contrast.** It looks for paper that is brighter
-  than the scanner's light-gray background. Grayish paper keeps the full scan
-  width.
+- **Unusual paper may not crop.** Edges are found from the thin shadow the
+  scanner sees along the paper; if none is found, the page keeps the full
+  scan width.
 - **Rotation is limited.** Pages are turned upright or upside down, but not
   from sideways.
 - **macOS only for now.** The core is portable Rust, but OCR and the UI are

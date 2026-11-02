@@ -102,7 +102,7 @@ pub fn analyze(jpeg: &[u8], dpi: f64) -> Result<Analysis> {
     let (g, full_w, full_h) = decode_small(jpeg)?;
     let scale = full_w as f64 / g.w as f64;
     let mut geo = PageGeometry::full(full_w as f64, full_h as f64, dpi);
-    let Some(edges) = find_edges(&g) else {
+    let Some(edges) = find_edges_by_shadow(&g).or_else(|| find_edges(&g)) else {
         let paper = percentile(
             &mut g
                 .px
@@ -135,8 +135,8 @@ pub fn analyze(jpeg: &[u8], dpi: f64) -> Result<Analysis> {
     geo.paper_h = (edges.bottom - edges.top) * cos * scale;
     geo.skew = edges.skew;
     geo.detected = true;
-    // Trim the thin shadow line along the paper edge (~0.5 mm).
-    let inset = dpi / 50.0;
+    // Trim the paper edge and any shadow next to it (~1 mm).
+    let inset = dpi / 25.0;
     geo.paper_w -= 2.0 * inset;
     geo.paper_h -= 2.0 * inset;
     let ink = ink_ratio(&g, &edges);
@@ -156,6 +156,131 @@ struct Edges {
     skew: f64,
     threshold: u8,
     paper: u8,
+}
+
+/// Finds the paper by the thin dark shadow the scanner draws along its edges:
+/// going from the background into the paper, brightness jumps sharply from the
+/// shadow to the paper. Works even when the paper is no brighter than the
+/// background. Fits straight lines through the jumps, which also gives the skew.
+fn find_edges_by_shadow(g: &Gray) -> Option<Edges> {
+    let (w, h) = (g.w, g.h);
+    if w < 64 || h < 64 {
+        return None;
+    }
+    let avg_row = |y: usize| -> Vec<f64> {
+        let (y0, y1) = (y.saturating_sub(1), (y + 1).min(h - 1));
+        (0..w).map(|x| (y0..=y1).map(|yy| g.at(x, yy) as f64).sum::<f64>() / (y1 - y0 + 1) as f64).collect()
+    };
+    let avg_col = |x: usize| -> Vec<f64> {
+        let (x0, x1) = (x.saturating_sub(1), (x + 1).min(w - 1));
+        (0..h).map(|y| (x0..=x1).map(|xx| g.at(xx, y) as f64).sum::<f64>() / (x1 - x0 + 1) as f64).collect()
+    };
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    for y in (h / 12..h - h / 12).step_by(3) {
+        let r = avg_row(y);
+        if let Some(x) = jump_from_start(&r, w * 18 / 100, 18.0) {
+            left.push((y as f64, x));
+        }
+        if let Some(x) = jump_from_end(&r, w * 18 / 100, 18.0) {
+            right.push((y as f64, x));
+        }
+    }
+    let (al, bl) = robust_line(&mut left)?;
+    let (ar, br) = robust_line(&mut right)?;
+    // Both edges of a sheet lean the same way.
+    if (al - ar).abs() > 0.02 {
+        return None;
+    }
+    let slope = (al + ar) / 2.0;
+    let skew = slope.atan();
+    if skew.abs() > 0.09 {
+        return None;
+    }
+    // Top and bottom: same idea down the columns between the side edges.
+    let ym = h as f64 / 2.0;
+    let (lm, rm) = (al * ym + bl, ar * ym + br);
+    if rm - lm < w as f64 * 0.3 {
+        return None;
+    }
+    let (x0, x1) = ((lm + (rm - lm) * 0.06) as usize, (rm - (rm - lm) * 0.06) as usize);
+    let mut top = Vec::new();
+    let mut bottom = Vec::new();
+    for x in (x0..x1).step_by(3) {
+        let c = avg_col(x);
+        if let Some(y) = jump_from_start(&c, h * 12 / 100, 12.0) {
+            top.push((x as f64, y));
+        }
+        if let Some(y) = jump_from_end(&c, h * 12 / 100, 12.0) {
+            bottom.push((x as f64, y));
+        }
+    }
+    let xm = (lm + rm) / 2.0;
+    let topm = robust_line(&mut top).map(|(a, b)| a * xm + b).unwrap_or(0.0).max(0.0);
+    let botm = robust_line(&mut bottom).map(|(a, b)| a * xm + b).unwrap_or(h as f64).min(h as f64);
+    // Edge positions where they cross the paper's center lines.
+    let ymid = (topm + botm) / 2.0;
+    let (left_mid, right_mid) = (al * ymid + bl, ar * ymid + br);
+    let inner: Vec<u8> = (topm as usize..botm as usize)
+        .step_by(5)
+        .flat_map(|y| (left_mid.max(0.0) as usize..(right_mid as usize).min(w)).step_by(5).map(move |x| (x, y)))
+        .map(|(x, y)| g.at(x, y))
+        .collect();
+    let paper = p90(inner.into_iter());
+    Some(Edges {
+        left: left_mid,
+        right: right_mid,
+        top: topm,
+        bottom: botm,
+        skew,
+        threshold: (paper * 0.85) as u8,
+        paper: paper as u8,
+    })
+}
+
+/// First sharp dark-to-bright step within `limit` samples of the start, landing on paper.
+fn jump_from_start(p: &[f64], limit: usize, min_step: f64) -> Option<f64> {
+    let n = p.len();
+    for i in 2..limit.min(n.saturating_sub(6)) {
+        let dark = p[i - 2].min(p[i - 1]).min(p[i]);
+        let ahead = (p[i + 1] + p[i + 2] + p[i + 3] + p[i + 4]) / 4.0;
+        if p[i + 1] - dark >= min_step && ahead >= 225.0 && ahead - dark >= min_step {
+            return Some(i as f64 + 0.5);
+        }
+    }
+    None
+}
+
+fn jump_from_end(p: &[f64], limit: usize, min_step: f64) -> Option<f64> {
+    let rev: Vec<f64> = p.iter().rev().copied().collect();
+    jump_from_start(&rev, limit, min_step).map(|i| p.len() as f64 - i)
+}
+
+/// Least-squares line `x = a·y + b` after repeatedly dropping the worst 20% of points.
+fn robust_line(pts: &mut Vec<(f64, f64)>) -> Option<(f64, f64)> {
+    let fit = |pts: &[(f64, f64)]| -> Option<(f64, f64)> {
+        let n = pts.len() as f64;
+        let (sy, sx) = pts.iter().fold((0.0, 0.0), |a, p| (a.0 + p.0, a.1 + p.1));
+        let (my, mx) = (sy / n, sx / n);
+        let (num, den) = pts
+            .iter()
+            .fold((0.0, 0.0), |a, p| (a.0 + (p.0 - my) * (p.1 - mx), a.1 + (p.0 - my).powi(2)));
+        (den > 0.0).then(|| (num / den, mx - num / den * my))
+    };
+    for _ in 0..4 {
+        if pts.len() < 15 {
+            return None;
+        }
+        let (a, b) = fit(pts)?;
+        let mut res: Vec<f64> = pts.iter().map(|p| (p.1 - (a * p.0 + b)).abs()).collect();
+        let cut = percentile(&mut res, 0.8).max(0.75);
+        let before = pts.len();
+        pts.retain(|p| (p.1 - (a * p.0 + b)).abs() <= cut);
+        if pts.len() == before {
+            break;
+        }
+    }
+    if pts.len() < 15 { None } else { fit(pts) }
 }
 
 fn percentile(v: &mut [f64], p: f64) -> f64 {
@@ -366,4 +491,11 @@ pub fn debug_profiles(jpeg: &[u8]) -> Result<(Vec<f64>, Vec<f64>)> {
         .map(|y| (0..g.w).map(|x| g.at(x, y) as f64).sum::<f64>() / g.w as f64)
         .collect();
     Ok((col, row))
+}
+
+/// One row of the small decode, for debugging edge detection.
+pub fn debug_row(jpeg: &[u8], frac: f64) -> Result<Vec<u8>> {
+    let (g, _, _) = decode_small(jpeg)?;
+    let y = ((g.h as f64 * frac) as usize).min(g.h - 1);
+    Ok((0..g.w).map(|x| g.at(x, y)).collect())
 }
