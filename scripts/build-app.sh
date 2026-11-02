@@ -30,6 +30,33 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/FeatherScan"
 cp macos/Resources/Info.plist "$APP/Contents/Info.plist"
 cp macos/Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+
+# Also compile the icon into an asset catalog (Assets.car). Newer macOS looks the
+# app icon up there (CFBundleIconName) in places like Notification Center, and shows
+# a blank tile when only the .icns exists.
+ICONTMP="$(mktemp -d)"
+iconutil -c iconset -o "$ICONTMP/AppIcon.iconset" macos/Resources/AppIcon.icns
+SET="$ICONTMP/Assets.xcassets/AppIcon.appiconset"
+mkdir -p "$SET"
+cp "$ICONTMP"/AppIcon.iconset/*.png "$SET/"
+{
+  echo '{"images":['
+  sep=""
+  for pt in 16 32 128 256 512; do
+    for sc in 1 2; do
+      suffix=""
+      if [[ $sc == 2 ]]; then suffix="@2x"; fi
+      name="icon_${pt}x${pt}${suffix}.png"
+      printf '%s{"idiom":"mac","size":"%sx%s","scale":"%sx","filename":"%s"}' "$sep" "$pt" "$pt" "$sc" "$name"
+      sep=","
+    done
+  done
+  echo '],"info":{"version":1,"author":"xcode"}}'
+} >"$SET/Contents.json"
+xcrun actool "$ICONTMP/Assets.xcassets" --compile "$APP/Contents/Resources" \
+  --platform macosx --minimum-deployment-target 14.0 --app-icon AppIcon \
+  --output-partial-info-plist "$ICONTMP/partial.plist" >/dev/null
+rm -rf "$ICONTMP"
 strip -x "$APP/Contents/MacOS/FeatherScan" 2>/dev/null || true
 
 # SHA-1 of the first valid identity of a kind whose certificate belongs to TEAM_ID.
