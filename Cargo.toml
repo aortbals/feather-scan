@@ -1,0 +1,15 @@
+[workspace]
+members = ["crates/feather-core", "crates/feather-cli"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+# Small, fast binaries: size-optimised, whole-program LTO, no symbols.
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = true

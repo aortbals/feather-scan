@@ -1,0 +1,7 @@
+/target
+/build
+/macos/.build
+/macos/.swiftpm
+*.dSYM
+.DS_Store
+/scripts/signing.env
