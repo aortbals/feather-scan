@@ -29,6 +29,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/FeatherScan"
 cp macos/Resources/Info.plist "$APP/Contents/Info.plist"
+cp macos/Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 strip -x "$APP/Contents/MacOS/FeatherScan" 2>/dev/null || true
 
 # SHA-1 of the first valid identity of a kind whose certificate belongs to TEAM_ID.

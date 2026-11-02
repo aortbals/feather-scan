@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/icon.png" width="128" height="128" alt="Feather Scan icon"></p>
+
 # Feather Scan
 
 A tiny, native replacement for ScanSnap Home with helpful AI filenames.
@@ -70,6 +72,10 @@ Requirements:
 ```bash
 ./scripts/build-app.sh          # → build/Feather Scan.app
 ```
+
+The app icon is drawn in code from the same feather as the menu bar icon;
+`scripts/make-icon.sh` regenerates `macos/Resources/AppIcon.icns`,
+`docs/icon.png` and `docs/feather.svg`.
 
 Signing is configured in `scripts/signing.env` (gitignored). Copy it from
 `scripts/signing.env.example` and set your `TEAM_ID`. The script then signs with
@@ -161,6 +167,7 @@ crates/feather-core   Rust core (staticlib + rlib)
 crates/feather-cli    the `feather` command
 macos/                SwiftUI menu bar app (Swift Package Manager)
 scripts/build-app.sh  builds and signs the .app
+scripts/make-icon.sh  draws the app icon and SVG from the menu bar feather
 docs/protocol.md      the Wi-Fi protocol
 ```
 
