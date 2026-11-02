@@ -35,6 +35,8 @@ final class AppModel: ObservableObject {
         }
         core = CoreBridge { [weak self] event in self?.handle(event) }
         notifier.setUp()
+        Updater.shared.isBusy = { [weak self] in self?.isWorking ?? false }
+        Updater.shared.start()
         if !core.start(configJSON: config.json(apiKey: Keychain.apiKey())) {
             state = .offline
             message = "Settings are invalid; open Settings to fix them."
@@ -50,6 +52,7 @@ final class AppModel: ObservableObject {
 
     /// Animates the feather while a scan runs; dims it while the scanner is unreachable.
     private func updateIcon() {
+        if isWorking { Updater.shared.lastBusy = Date() }
         if isWorking, workToken == nil {
             workToken = ProcessInfo.processInfo.beginActivity(
                 options: [.userInitiated, .idleSystemSleepDisabled], reason: "Scanning and saving a document")
@@ -65,6 +68,9 @@ final class AppModel: ObservableObject {
     }
 
     var isReady: Bool { state == .ready }
+
+    /// Paper is feeding or a PDF is being made; updates wait for this to finish.
+    var isBusy: Bool { isWorking }
 
     func scanNow() { core.scanNow() }
 

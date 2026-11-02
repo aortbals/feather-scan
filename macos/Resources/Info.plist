@@ -32,6 +32,8 @@
 	<string>public.app-category.productivity</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Feather Scan talks to your ScanSnap scanner over the local network.</string>
+	<key>FeatherUpdateRepo</key>
+	<string>aortbals/feather-scan</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>MIT License</string>
 </dict>

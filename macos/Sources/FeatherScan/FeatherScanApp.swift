@@ -20,6 +20,7 @@ struct FeatherScanApp: App {
 
 struct MenuContent: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var updater = Updater.shared
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
@@ -45,6 +46,15 @@ struct MenuContent: View {
             }
         }
         Divider()
+        if let update = updater.available {
+            Button(updateTitle(update)) { updater.install() }
+                .disabled(updater.phase != .idle || model.isBusy)
+        } else {
+            Button(updater.phase == .checking ? "Checking for Updates…" : updater.note ?? "Check for Updates…") {
+                Task { await updater.check(manual: true) }
+            }
+            .disabled(updater.phase != .idle)
+        }
         Button("Settings…") { showSettings() }
             .keyboardShortcut(",")
         Button("Quit Feather Scan") { NSApplication.shared.terminate(nil) }
@@ -53,6 +63,14 @@ struct MenuContent: View {
 }
 
 extension MenuContent {
+    func updateTitle(_ update: Updater.Release) -> String {
+        switch updater.phase {
+        case .downloading: "Downloading \(update.version)…"
+        case .installing: "Installing \(update.version)…"
+        default: updater.canInstall ? "Install Update \(update.version)" : "Download Update \(update.version)…"
+        }
+    }
+
     /// A menu bar app isn't active when its menu is used, so a newly opened (or
     /// already open) Settings window would sit behind other apps' windows.
     /// Open it, then bring the app and the window to the front once the menu has closed.

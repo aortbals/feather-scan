@@ -19,6 +19,7 @@ struct SettingsView: View {
 
 private struct GeneralSettings: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var updater = Updater.shared
     @State private var launchAtLogin = false
 
     var body: some View {
@@ -37,6 +38,13 @@ private struct GeneralSettings: View {
                 .help("Straighten, crop and whiten pages for crisper text. Off keeps the scanner's original images.")
             Toggle("Open at login", isOn: $launchAtLogin)
                 .onChange(of: launchAtLogin) { _, v in model.launchAtLogin = v }
+            Toggle("Check for updates automatically", isOn: $updater.checkAutomatically)
+                .help("Looks for a new version on GitHub about once a day. Version \(updater.currentVersion).")
+            Toggle("Install updates automatically", isOn: $updater.installAutomatically)
+                .disabled(!updater.checkAutomatically || !updater.canInstall)
+                .help(updater.canInstall
+                      ? "Installs a new version once the scanner has been idle for a few minutes. Otherwise it waits in the menu."
+                      : "This copy isn't signed with a Developer ID, so updates are downloaded from GitHub instead.")
         }
         .formStyle(.grouped)
         .onAppear { launchAtLogin = model.launchAtLogin }

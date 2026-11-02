@@ -90,6 +90,30 @@ To force a specific identity, set `SIGN_IDENTITY`. For notarization, create a
 keychain profile once with
 `xcrun notarytool store-credentials <name> --apple-id … --team-id …`.
 
+### Releases and updates
+
+The app checks this repo's GitHub Releases about once a day. By default a new
+version installs itself, and the app relaunches, once the scanner has been idle
+for a couple of minutes. With **Install updates automatically** off in
+Settings → General, the update waits in the menu as **Install Update X.Y.Z**.
+Updates never post notifications. **Check for Updates…** is in the menu. A
+release needs:
+
+- a tag `vX.Y.Z` matching `CFBundleShortVersionString` in the app it ships, and
+- an asset named `Feather-Scan-X.Y.Z.zip` holding the notarized `Feather Scan.app`
+  (the `build/Feather Scan.zip` that `build-app.sh` makes).
+
+Installing downloads the zip, checks that the new app is signed with a
+Developer ID from the same team as the running app, replaces the app in place
+and relaunches it. Copies signed any other way (development, ad-hoc, a fork's
+own certificate) never install someone else's build; they only link to the
+download page. Forks can point the check at their own repo with the
+`FeatherUpdateRepo` key in `macos/Resources/Info.plist`.
+
+To test against a local feed:
+`defaults write app.featherscan.FeatherScan updateFeedURL http://127.0.0.1:8765/latest.json`
+(remove it with `defaults delete app.featherscan.FeatherScan updateFeedURL`).
+
 ## Command line
 
 The `feather` CLI drives the same core, which is handy for testing and for headless use:
