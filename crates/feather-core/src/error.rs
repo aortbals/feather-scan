@@ -5,6 +5,8 @@ pub enum Error {
     Io(std::io::Error),
     /// The scanner sent something we did not expect.
     Protocol(String),
+    /// Nothing answered discovery: the scanner is asleep, off, or held by ScanSnap Home.
+    NotFound,
     /// A SCSI command failed; carries the decoded sense.
     Scsi(String),
     /// The feeder ran out of paper before the first sheet.
@@ -25,6 +27,7 @@ impl fmt::Display for Error {
         match self {
             Error::Io(e) => write!(f, "network error: {e}"),
             Error::Protocol(m) => write!(f, "protocol error: {m}"),
+            Error::NotFound => write!(f, "scanner not found (asleep or off?)"),
             Error::Scsi(m) => write!(f, "scanner error: {m}"),
             Error::NoPaper => write!(f, "no paper in the feeder"),
             Error::Feed(m) => write!(f, "{m}"),

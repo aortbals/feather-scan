@@ -159,6 +159,9 @@ struct Session {
     handshake_due: bool,
     /// When the last handshake ran; the scanner repeats each notice several times.
     last_handshake: Option<Instant>,
+    /// The last search found nothing; keep the "asleep" status instead of
+    /// flashing "Looking for the scanner…" on every retry.
+    asleep: bool,
 }
 
 enum Flow {
@@ -179,6 +182,7 @@ impl Session {
             select_notices: None,
             handshake_due: false,
             last_handshake: None,
+            asleep: false,
         }
     }
 
@@ -198,7 +202,9 @@ impl Session {
         // Scans are user-initiated work; don't let macOS treat them as background.
         pipeline::prioritize_current_thread();
         loop {
-            match self.connect() {
+            let result = self.connect();
+            self.asleep = matches!(result, Err(Error::NotFound));
+            match result {
                 Ok(mut c) => {
                     self.status(
                         State::Ready,
@@ -225,6 +231,12 @@ impl Session {
                     _ => continue,
                 },
                 Err(Error::Config(m)) => self.status(State::NotPaired, m, None),
+                // Normal when the scanner sleeps; it reconnects on its own once woken.
+                Err(Error::NotFound) => self.status(
+                    State::Offline,
+                    "Scanner asleep — wake it to connect",
+                    None,
+                ),
                 Err(e) => self.status(State::Offline, e.to_string(), None),
             }
             // Wait before retrying, but stay responsive to commands.
@@ -283,7 +295,9 @@ impl Session {
     }
 
     fn find_scanner(&self) -> Result<ScannerInfo> {
-        self.status(State::Searching, "Looking for the scanner…", None);
+        if !self.asleep {
+            self.status(State::Searching, "Looking for the scanner…", None);
+        }
         let found = discovery::discover(self.cfg.scanner_ip, Duration::from_millis(1500))?;
         if let Some(s) = found.into_iter().next() {
             return Ok(s);
@@ -299,9 +313,7 @@ impl Session {
                 selected_host_id: None,
             });
         }
-        Err(Error::Protocol(
-            "No scanner found. Is it on, and is ScanSnap Home quit? You can also set the scanner's IP.".into(),
-        ))
+        Err(Error::NotFound)
     }
 
     fn connect(&mut self) -> Result<Connected> {
