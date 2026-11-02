@@ -7,29 +7,49 @@ enum FeatherIcon {
 
     /// Resting feather. `dimmed` is used while offline.
     static func still(dimmed: Bool = false) -> NSImage {
-        image(angle: 0, lift: 0, alpha: dimmed ? 0.4 : 1)
+        image { _ in dimmed ? 0.4 : 1 }
     }
 
-    /// Frames of a feather gently rocking and floating, for while a scan runs.
+    /// Frames of a shimmer for while a scan runs: the feather dims a little and
+    /// a soft band of light sweeps from the quill to the tip, then rests.
     static let scanningFrames: [NSImage] = {
-        let steps = 12
-        return (0..<steps).map { i in
-            let t = Double(i) / Double(steps) * 2 * .pi
-            return image(angle: 10 * sin(t), lift: 0.8 * sin(2 * t), alpha: 1)
+        let sweep = 14, rest = 6
+        let base = 0.45
+        return (0..<(sweep + rest)).map { i in
+            guard i < sweep else { return image { _ in base } }
+            // Band center travels from below the quill to past the tip.
+            let center = -0.3 + 1.6 * Double(i) / Double(sweep - 1)
+            return image { y in base + (1 - base) * exp(-pow((y - center) / 0.2, 2)) }
         }
     }()
 
-    /// `angle` in degrees (positive = counterclockwise), `lift` in points.
-    private static func image(angle: Double, lift: Double, alpha: Double) -> NSImage {
+    /// Draws the feather with opacity given per point along its length
+    /// (`opacity(y)`, y = 0 at the quill, 1 at the tip).
+    private static func image(opacity: @escaping (Double) -> Double) -> NSImage {
         let img = NSImage(size: size, flipped: false) { rect in
             guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
-            ctx.setAlpha(alpha)
-            ctx.translateBy(x: rect.midX, y: rect.midY + lift)
+            ctx.translateBy(x: rect.midX, y: rect.midY)
             // The quill leans to the right, like a pen.
-            ctx.rotate(by: (-38 + angle) * .pi / 180)
+            ctx.rotate(by: -38 * .pi / 180)
             ctx.scaleBy(x: 18, y: 18)
             ctx.translateBy(x: 0, y: -0.5)
+            ctx.beginTransparencyLayer(auxiliaryInfo: nil)
             drawFeather(in: ctx)
+            // Recolor the drawn feather with an opacity gradient along its length.
+            let steps = 32
+            var colors: [CGColor] = []
+            var locations: [CGFloat] = []
+            for k in 0...steps {
+                let y = Double(k) / Double(steps)
+                colors.append(NSColor(white: 0, alpha: min(1, max(0, opacity(y)))).cgColor)
+                locations.append(CGFloat(y))
+            }
+            if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceGray(), colors: colors as CFArray, locations: locations) {
+                ctx.setBlendMode(.sourceIn)
+                ctx.drawLinearGradient(gradient, start: CGPoint(x: 0, y: 0), end: CGPoint(x: 0, y: 1),
+                                       options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+            }
+            ctx.endTransparencyLayer()
             return true
         }
         img.isTemplate = true
