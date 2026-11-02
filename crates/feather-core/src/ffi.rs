@@ -82,6 +82,19 @@ pub unsafe extern "C" fn feather_scan_now(handle: *mut c_void) {
     }
 }
 
+/// Pairs this computer with the scanner (no ScanSnap Home needed). The running
+/// session is ended first. Results arrive as events: `identity` and `paired` on
+/// success (then the person selects this computer on the scanner's screen), or `error`.
+///
+/// # Safety
+/// `handle` must come from `feather_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn feather_pair(handle: *mut c_void) {
+    if let Some(engine) = unsafe { (handle as *const Engine).as_ref() } {
+        engine.pair();
+    }
+}
+
 /// Stops the engine, waits for running jobs, and frees the handle.
 ///
 /// # Safety

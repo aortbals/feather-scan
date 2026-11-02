@@ -17,6 +17,10 @@ USAGE:
   feather scan [--ip IP] [--out DIR] connect, scan what's in the feeder, exit
   feather pdf [--out DIR] [--no-title] [--dpi N] IMAGE.jpg…
                                    build a searchable PDF from JPEGs (offline test)
+  feather pair [--ip IP] [--dry-run]
+                                   pair this computer with the scanner (no ScanSnap
+                                   Home needed); --dry-run prints the new list only
+  feather users --ip IP            print the scanner's computers and profiles
   feather config                   print the config path and current config
 
 Config: ~/Library/Application Support/Feather Scan/config.json
@@ -57,6 +61,7 @@ fn main() {
     let mut cfg = load_config();
     let mut rest: Vec<String> = Vec::new();
     let mut no_title = false;
+    let mut dry_run = false;
     let mut dpi = 300.0;
     let mut it = args[1..].iter();
     while let Some(a) = it.next() {
@@ -64,6 +69,7 @@ fn main() {
             "--ip" => cfg.scanner_ip = it.next().and_then(|s| s.parse().ok()),
             "--out" => cfg.output_dir = it.next().map(PathBuf::from).unwrap_or(cfg.output_dir),
             "--no-title" => no_title = true,
+            "--dry-run" => dry_run = true,
             "--dpi" => dpi = it.next().and_then(|s| s.parse().ok()).unwrap_or(dpi),
             _ => rest.push(a.clone()),
         }
@@ -77,6 +83,7 @@ fn main() {
             }
         }
         "run" | "scan" => run(cfg, cmd == "scan"),
+        "pair" => pair(cfg, dry_run),
         "pdf" => {
             if rest.is_empty() {
                 fail("give at least one JPEG");
@@ -159,6 +166,46 @@ fn main() {
             println!("{}", serde_json::to_string_pretty(&shown).unwrap());
         }
         _ => println!("{USAGE}"),
+    }
+}
+
+fn pair(mut cfg: Config, dry_run: bool) {
+    use feather_core::pairing;
+    let ip = match cfg.scanner_ip {
+        Some(ip) => ip,
+        None => feather_core::proto::discovery::discover(None, Duration::from_secs(2))
+            .ok()
+            .and_then(|f| f.into_iter().next())
+            .map(|s| s.ip)
+            .unwrap_or_else(|| fail("no scanner found; give --ip")),
+    };
+    let me = pairing::identity_for_pairing(cfg.identity.as_ref())
+        .unwrap_or_else(|e| fail(&e.to_string()));
+    if dry_run {
+        let host = feather_core::net::host_addr_for(ip).unwrap_or_else(|e| fail(&e.to_string()));
+        let ctl = feather_core::proto::control::Control::new(ip, host);
+        let current = ctl.read_users().unwrap_or_else(|e| fail(&e.to_string()));
+        let (list, _) = pairing::merge(&current, &me, host.ip, "NEW-PROFILE-ID")
+            .unwrap_or_else(|e| fail(&e.to_string()));
+        eprintln!("dry run: would write this list (nothing was sent to the scanner)");
+        println!("{}", serde_json::to_string_pretty(&list).unwrap());
+        return;
+    }
+    eprintln!(
+        "Quit ScanSnap Home and the Feather Scan app first: only one app can hold the scanner."
+    );
+    match pairing::pair(ip, &me, &|m| eprintln!("{m}")) {
+        Ok(p) => {
+            cfg.scanner_ip = Some(ip);
+            cfg.identity = Some(p.identity.clone());
+            save_identity(&cfg);
+            eprintln!("Saved the new identity to {}", config_path().display());
+            eprintln!("{}", p.instructions());
+            if p.connect_code >= 0 {
+                eprintln!("(The scanner already has this computer selected.)");
+            }
+        }
+        Err(e) => fail(&format!("pairing failed: {e}")),
     }
 }
 

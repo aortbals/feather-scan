@@ -30,6 +30,12 @@ final class CoreBridge {
         feather_scan_now(handle)
     }
 
+    /// Pairs with the scanner; the outcome arrives as `identity`/`paired`/`error` events.
+    func pair() {
+        guard let handle else { return }
+        feather_pair(handle)
+    }
+
     func stop() {
         guard let h = handle else { return }
         handle = nil

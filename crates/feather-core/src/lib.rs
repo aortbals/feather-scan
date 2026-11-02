@@ -9,6 +9,7 @@ pub mod ffi;
 pub mod imaging;
 pub mod net;
 pub mod ocr;
+pub mod pairing;
 pub mod pdf;
 pub mod pipeline;
 pub mod scanner;

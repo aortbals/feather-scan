@@ -118,6 +118,7 @@ private struct ScannerSettings: View {
     @State private var ip = ""
     @State private var found: [CoreBridge.Found] = []
     @State private var searching = false
+    @State private var confirmPair = false
 
     var body: some View {
         Form {
@@ -142,12 +143,22 @@ private struct ScannerSettings: View {
             if let id = model.config.identity {
                 LabeledContent("Paired as", value: id.userName)
             }
-            Text("Quit ScanSnap Home while using Feather Scan: only one app can hold the scanner. Feather Scan uses this computer's existing ScanSnap pairing, so pick this computer on the scanner's screen.")
+            HStack {
+                Button(model.isPairing ? "Pairing…" : "Pair with Scanner") { confirmPair = true }
+                    .disabled(model.isPairing)
+                Spacer()
+            }
+            Text("Quit ScanSnap Home while using Feather Scan: only one app can hold the scanner. Feather Scan uses this computer's existing ScanSnap pairing if there is one; otherwise pair here, then pick this computer on the scanner's screen.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
         .onAppear { ip = model.config.scannerIp ?? "" }
+        .confirmationDialog("Pair with the scanner?", isPresented: $confirmPair) {
+            Button("Pair") { model.pair() }
+        } message: {
+            Text("Adds this Mac as a computer on the scanner, keeping every computer and profile already there. Afterwards, tap the person icon on the scanner's screen and pick this Mac. A copy of the scanner's list is saved in ~/Library/Application Support/Feather Scan/backups.")
+        }
     }
 
     private var dpiBinding: Binding<Int> {
