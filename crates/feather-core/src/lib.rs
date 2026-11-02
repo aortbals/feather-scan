@@ -5,6 +5,7 @@ pub mod config;
 pub mod engine;
 pub mod enhance;
 pub mod error;
+pub mod eventlog;
 pub mod ffi;
 pub mod imaging;
 pub mod net;

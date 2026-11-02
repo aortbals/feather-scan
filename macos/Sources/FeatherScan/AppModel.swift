@@ -171,12 +171,29 @@ final class AppModel: ObservableObject {
     }
 }
 
+/// Appends a line to ~/Library/Logs/Feather Scan/app.log (next to the core's events.log).
+func appLog(_ message: String) {
+    let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Feather Scan")
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let url = dir.appendingPathComponent("app.log")
+    let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)\n"
+    if let h = try? FileHandle(forWritingTo: url) {
+        h.seekToEndOfFile()
+        h.write(Data(line.utf8))
+        try? h.close()
+    } else {
+        try? Data(line.utf8).write(to: url)
+    }
+}
+
 /// Posts "scan saved" notifications; clicking one opens the PDF.
 final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     func setUp() {
         let c = UNUserNotificationCenter.current()
         c.delegate = self
-        c.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        c.requestAuthorization(options: [.alert, .sound]) { granted, error in
+            appLog("notifications: granted=\(granted) error=\(String(describing: error))")
+        }
     }
 
     func post(title: String, body: String, path: String?) {
@@ -184,7 +201,9 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         content.title = title
         content.body = body
         if let path { content.userInfo = ["path": path] }
-        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)) { error in
+            if let error { appLog("notification failed: \(error)") }
+        }
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,

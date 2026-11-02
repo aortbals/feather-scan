@@ -102,7 +102,7 @@ fn main() {
                 .collect();
             let t = std::time::Instant::now();
             let engine = feather_core::ocr::default_engine();
-            match pipeline::process(images, &cfg, engine.as_ref()) {
+            match pipeline::process(images, &cfg, engine) {
                 Ok(s) => {
                     println!("{}", serde_json::to_string_pretty(&s).unwrap());
                     eprintln!("took {:.1}s", t.elapsed().as_secs_f64());

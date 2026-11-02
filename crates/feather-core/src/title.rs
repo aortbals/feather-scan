@@ -116,6 +116,9 @@ pub fn sanitize(raw: &str, today: &str) -> String {
     if !starts_with_date(&out) {
         out = format!("{today} - {out}");
     }
+    // Always "YYYY-MM-DD - Title", however the model separated them.
+    let rest = out[10..].trim_start_matches([' ', '-', '_', '–', '—']).trim().to_string();
+    out = if rest.is_empty() { out[..10].to_string() } else { format!("{} - {rest}", &out[..10]) };
     // "2026-08-17 - 2026-11-01 - Title": keep only the first date.
     while out.len() > 13 && starts_with_date(&out[13..]) && out[10..13] == *" - " {
         out.replace_range(13..26.min(out.len()), "");

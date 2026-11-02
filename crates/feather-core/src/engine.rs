@@ -95,6 +95,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn start(cfg: Config, sink: EventSink) -> Engine {
+        let sink = crate::eventlog::wrap(sink);
         let (tx, rx) = mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("feather-session".into())
@@ -668,7 +669,9 @@ impl Session {
             source: source.into(),
         });
         self.status(State::Scanning, "Scanning…", Some(&c.info));
-        let mut images = Vec::new();
+        // Pages are cleaned up and recognized while the next sheets feed.
+        let mut batch = pipeline::Batch::new(self.cfg.clone(), crate::ocr::default_engine());
+        let mut images = 0usize;
         let mut sheets = 0;
         let sink = self.sink.clone();
         let result = Scanner::new(&mut c.scsi).scan(&settings, |sheet| {
@@ -678,18 +681,9 @@ impl Session {
             } else {
                 settings.dpi as f64
             };
-            images.push(ScannedImage {
-                jpeg: sheet.front,
-                dpi,
-                back: false,
-            });
-            if let Some(b) = sheet.back {
-                images.push(ScannedImage {
-                    jpeg: b,
-                    dpi,
-                    back: true,
-                });
-            }
+            let back = sheet.back.map(|b| ScannedImage { jpeg: b, dpi, back: true });
+            images += 1 + back.is_some() as usize;
+            batch.add_sheet(ScannedImage { jpeg: sheet.front, dpi, back: false }, back);
             sink(Event::Page { sheets });
         });
         let flow = match &result {
@@ -705,8 +699,8 @@ impl Session {
             }),
             Ok(_) => {}
         }
-        if !images.is_empty() {
-            self.spawn_pipeline(images, scan_started.elapsed().as_millis() as u64);
+        if !batch.is_empty() {
+            self.spawn_pipeline(batch, images, scan_started.elapsed().as_millis() as u64);
         }
         if matches!(flow, Flow::Continue) {
             self.status(
@@ -718,15 +712,11 @@ impl Session {
         flow
     }
 
-    fn spawn_pipeline(&self, images: Vec<ScannedImage>, scan_ms: u64) {
-        let cfg = self.cfg.clone();
+    fn spawn_pipeline(&self, batch: pipeline::Batch, images: usize, scan_ms: u64) {
         let sink = self.sink.clone();
         let handle = std::thread::spawn(move || {
-            sink(Event::Processing {
-                images: images.len(),
-            });
-            let engine = crate::ocr::default_engine();
-            match pipeline::process(images, &cfg, engine.as_ref()) {
+            sink(Event::Processing { images });
+            match batch.finish() {
                 Ok(s) => sink(Event::Saved {
                     path: s.path.display().to_string(),
                     title: s.title,

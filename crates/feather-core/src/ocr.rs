@@ -90,14 +90,14 @@ impl OcrEngine for NoOcr {
     }
 }
 
-pub fn default_engine() -> Box<dyn OcrEngine> {
+pub fn default_engine() -> std::sync::Arc<dyn OcrEngine> {
     #[cfg(target_os = "macos")]
     {
-        Box::new(vision::VisionOcr)
+        std::sync::Arc::new(vision::VisionOcr)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Box::new(NoOcr)
+        std::sync::Arc::new(NoOcr)
     }
 }
 

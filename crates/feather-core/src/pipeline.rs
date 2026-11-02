@@ -21,7 +21,8 @@ pub struct ScannedImage {
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Timings {
     pub analyze_ms: u64,
-    /// Clean-up and OCR, all pages (runs in parallel).
+    /// Waiting for page clean-up and OCR after the last sheet arrived
+    /// (pages are processed while scanning continues).
     pub pages_ms: u64,
     /// Summed over pages: decode, crop, clean-up and encode.
     pub prep_ms: u64,
@@ -31,6 +32,7 @@ pub struct Timings {
     pub ocr_max_ms: u64,
     pub title_ms: u64,
     pub write_ms: u64,
+    /// From the first sheet to the saved PDF.
     pub total_ms: u64,
 }
 
@@ -63,80 +65,149 @@ pub fn prioritize_current_thread() {
     }
 }
 
-pub fn process(images: Vec<ScannedImage>, cfg: &Config, engine: &dyn OcrEngine) -> Result<Saved> {
-    prioritize_current_thread();
-    let started = Instant::now();
-    let mut timings = Timings::default();
+type Slot = (usize, Result<Processed>);
 
-    // 1. Find paper edges and blank pages (fast, on a small decode).
-    let mut analyses: Vec<Analysis> = images
-        .iter()
-        .map(|img| imaging::analyze(&img.jpeg, img.dpi))
-        .collect::<Result<_>>()?;
-    // Front and back are the same sheet: if edges were found on only one side, reuse them.
-    for i in 0..analyses.len().saturating_sub(1) {
-        if images[i].back || !images[i + 1].back {
-            continue;
-        }
-        let (a, b) = (analyses[i].geometry, analyses[i + 1].geometry);
-        if (a.img_w, a.img_h) != (b.img_w, b.img_h) {
-            continue;
-        }
-        if a.detected && !b.detected {
-            analyses[i + 1].geometry = a.mirrored();
-        } else if b.detected && !a.detected {
-            analyses[i].geometry = b.mirrored();
-        }
-    }
-    timings.analyze_ms = started.elapsed().as_millis() as u64;
+/// A scan in progress. Sheets are analyzed and their pages cleaned up and
+/// recognized as they arrive, while the scanner feeds the next sheet;
+/// `finish` then names the document and writes the PDF.
+pub struct Batch {
+    cfg: std::sync::Arc<Config>,
+    jobs: Option<std::sync::mpsc::Sender<(usize, ScannedImage, Analysis)>>,
+    results: std::sync::mpsc::Receiver<Slot>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+    backs: Vec<bool>,
+    analyze_ms: u64,
+    error: Option<crate::error::Error>,
+    started: Instant,
+}
 
-    // 2. Clean up and recognize each page, in parallel.
-    let t = Instant::now();
-    let n = images.len();
-    let workers = std::env::var("FEATHER_OCR_THREADS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(2usize)
-        .max(1);
-    let mut slots: Vec<Option<Result<Processed>>> = (0..n).map(|_| None).collect();
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let (images_ref, analyses_ref) = (&images, &analyses);
-    std::thread::scope(|s| {
-        let handles: Vec<_> = (0..workers.min(n.max(1)))
+impl Batch {
+    pub fn new(cfg: Config, engine: std::sync::Arc<dyn OcrEngine>) -> Batch {
+        let cfg = std::sync::Arc::new(cfg);
+        let (job_tx, job_rx) = std::sync::mpsc::channel::<(usize, ScannedImage, Analysis)>();
+        let job_rx = std::sync::Arc::new(std::sync::Mutex::new(job_rx));
+        let (res_tx, results) = std::sync::mpsc::channel::<Slot>();
+        let n = std::env::var("FEATHER_OCR_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(2usize).max(1);
+        let workers = (0..n)
             .map(|_| {
-                s.spawn(|| {
+                let (job_rx, res_tx, cfg, engine) = (job_rx.clone(), res_tx.clone(), cfg.clone(), engine.clone());
+                std::thread::spawn(move || {
                     prioritize_current_thread();
-                    let mut done = Vec::new();
                     loop {
-                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if i >= n {
+                        let job = job_rx.lock().unwrap().recv();
+                        let Ok((i, img, analysis)) = job else { break };
+                        let r = process_one(&img, &analysis, &cfg, engine.as_ref());
+                        if res_tx.send((i, r)).is_err() {
                             break;
                         }
-                        done.push((i, process_one(&images_ref[i], &analyses_ref[i], cfg, engine)));
                     }
-                    done
                 })
             })
             .collect();
-        for h in handles {
-            for (i, r) in h.join().unwrap_or_default() {
-                slots[i] = Some(r);
+        Batch {
+            cfg,
+            jobs: Some(job_tx),
+            results,
+            workers,
+            backs: Vec::new(),
+            analyze_ms: 0,
+            error: None,
+            started: Instant::now(),
+        }
+    }
+
+    /// Queues one sheet. Cheap: analysis runs here, the heavy work on the workers.
+    pub fn add_sheet(&mut self, front: ScannedImage, back: Option<ScannedImage>) {
+        let t = Instant::now();
+        let mut sides = vec![front];
+        sides.extend(back);
+        let analyses: Result<Vec<Analysis>> = sides.iter().map(|s| imaging::analyze(&s.jpeg, s.dpi)).collect();
+        let mut analyses = match analyses {
+            Ok(a) => a,
+            Err(e) => {
+                self.error.get_or_insert(e);
+                return;
+            }
+        };
+        // Front and back are the same sheet: if edges were found on only one side, reuse them.
+        if let [a, b] = analyses.as_mut_slice()
+            && (a.geometry.img_w, a.geometry.img_h) == (b.geometry.img_w, b.geometry.img_h) {
+                if a.geometry.detected && !b.geometry.detected {
+                    b.geometry = a.geometry.mirrored();
+                } else if b.geometry.detected && !a.geometry.detected {
+                    a.geometry = b.geometry.mirrored();
+                }
+            }
+        self.analyze_ms += t.elapsed().as_millis() as u64;
+        for (img, analysis) in sides.into_iter().zip(analyses) {
+            let i = self.backs.len();
+            self.backs.push(img.back);
+            if let Some(tx) = &self.jobs {
+                let _ = tx.send((i, img, analysis));
             }
         }
-    });
-    let mut pages = Vec::with_capacity(n);
-    for s in slots {
-        pages.push(s.expect("every image processed")?);
     }
-    timings.pages_ms = t.elapsed().as_millis() as u64;
-    timings.prep_ms = pages.iter().map(|p| p.prep_ms).sum();
-    timings.ocr_ms = pages.iter().map(|p| p.ocr_ms).sum();
-    timings.ocr_max_ms = pages.iter().map(|p| p.ocr_ms).max().unwrap_or(0);
 
+    pub fn is_empty(&self) -> bool {
+        self.backs.is_empty()
+    }
+
+    /// Waits for the remaining pages, names the document and writes the PDF.
+    pub fn finish(mut self) -> Result<Saved> {
+        prioritize_current_thread();
+        let finishing = Instant::now();
+        let mut timings = Timings { analyze_ms: self.analyze_ms, ..Default::default() };
+        drop(self.jobs.take());
+        let n = self.backs.len();
+        let mut slots: Vec<Option<Result<Processed>>> = (0..n).map(|_| None).collect();
+        for (i, r) in self.results.iter().take(n) {
+            slots[i] = Some(r);
+        }
+        for w in self.workers.drain(..) {
+            let _ = w.join();
+        }
+        if let Some(e) = self.error.take() {
+            return Err(e);
+        }
+        let mut pages = Vec::with_capacity(n);
+        for s in slots {
+            pages.push(s.ok_or_else(|| crate::error::Error::Protocol("a page was not processed".into()))??);
+        }
+        // Time spent waiting for pages after the last sheet arrived.
+        timings.pages_ms = finishing.elapsed().as_millis() as u64;
+        timings.prep_ms = pages.iter().map(|p| p.prep_ms).sum();
+        timings.ocr_ms = pages.iter().map(|p| p.ocr_ms).sum();
+        timings.ocr_max_ms = pages.iter().map(|p| p.ocr_ms).max().unwrap_or(0);
+        let cfg = self.cfg.clone();
+        let saved = write_document(pages, &self.backs, &cfg, timings, finishing);
+        saved.map(|mut s| {
+            s.timings.total_ms = self.started.elapsed().as_millis() as u64;
+            s
+        })
+    }
+}
+
+/// Processes already-scanned images (fronts and backs in order) in one go.
+pub fn process(images: Vec<ScannedImage>, cfg: &Config, engine: std::sync::Arc<dyn OcrEngine>) -> Result<Saved> {
+    let mut batch = Batch::new(cfg.clone(), engine);
+    let mut it = images.into_iter().peekable();
+    while let Some(front) = it.next() {
+        let back = if it.peek().is_some_and(|n| n.back) { it.next() } else { None };
+        batch.add_sheet(front, back);
+    }
+    batch.finish()
+}
+
+fn write_document(
+    mut pages: Vec<Processed>,
+    backs: &[bool],
+    cfg: &Config,
+    mut timings: Timings,
+    finishing: Instant,
+) -> Result<Saved> {
     let mut removed = 0;
     if cfg.remove_blank_pages && pages.iter().any(|p| !p.blank) {
         let before = pages.len();
-        let backs: Vec<bool> = images.iter().map(|i| i.back).collect();
         let mut i = 0;
         pages.retain(|p| {
             let keep = !(p.blank && backs[i] && p.ocr.text().trim().len() < 8);
@@ -146,7 +217,7 @@ pub fn process(images: Vec<ScannedImage>, cfg: &Config, engine: &dyn OcrEngine) 
         removed = before - pages.len();
     }
 
-    // 3. Name it.
+    // Name it.
     let t = Instant::now();
     let now = local_now();
     let today = now.date();
@@ -162,7 +233,7 @@ pub fn process(images: Vec<ScannedImage>, cfg: &Config, engine: &dyn OcrEngine) 
     };
     timings.title_ms = t.elapsed().as_millis() as u64;
 
-    // 4. Write it.
+    // Write it.
     let t = Instant::now();
     let pdf_pages: Vec<PdfPage> =
         pages.into_iter().map(|p| PdfPage { jpeg: p.jpeg, geometry: p.geometry, ocr: p.ocr }).collect();
@@ -173,7 +244,7 @@ pub fn process(images: Vec<ScannedImage>, cfg: &Config, engine: &dyn OcrEngine) 
     std::fs::write(&tmp, &bytes)?;
     std::fs::rename(&tmp, &path)?;
     timings.write_ms = t.elapsed().as_millis() as u64;
-    timings.total_ms = started.elapsed().as_millis() as u64;
+    timings.total_ms = finishing.elapsed().as_millis() as u64;
     Ok(Saved { path, title, pages: pdf_pages.len(), removed_blank: removed, title_error, timings })
 }
 
