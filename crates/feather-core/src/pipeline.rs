@@ -249,7 +249,7 @@ fn write_document(
         .collect::<Vec<_>>()
         .join("\n\n");
     let fallback = format!("{} Scan", now.stamp());
-    let (title, title_error) = if cfg.llm.enabled {
+    let (title, title_error) = if cfg.llm.should_request() {
         match crate::title::generate(&cfg.llm, &text, &today) {
             Ok(t) => (t, None),
             Err(e) => (fallback, Some(e.to_string())),

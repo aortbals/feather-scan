@@ -151,6 +151,22 @@ fn starts_with_date(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn needs_a_key_for_openai_only() {
+        let mut cfg = crate::config::LlmConfig::default();
+        assert!(!cfg.should_request(), "default: OpenAI without a key");
+        cfg.api_key = Some("  ".into());
+        assert!(!cfg.should_request(), "blank key");
+        cfg.api_key = Some("sk-test".into());
+        assert!(cfg.should_request());
+        cfg.enabled = false;
+        assert!(!cfg.should_request(), "turned off");
+        cfg.enabled = true;
+        cfg.api_key = None;
+        cfg.base_url = "http://localhost:11434/v1".into();
+        assert!(cfg.should_request(), "local server without a key");
+    }
+
     use super::*;
 
     #[test]

@@ -36,6 +36,15 @@ pub struct LlmConfig {
     pub model: String,
 }
 
+impl LlmConfig {
+    /// Whether scans should be sent for a title. OpenAI needs a key, so without
+    /// one nothing is sent there; other endpoints (a local server, say) may not.
+    pub fn should_request(&self) -> bool {
+        let has_key = self.api_key.as_deref().is_some_and(|k| !k.trim().is_empty());
+        self.enabled && (has_key || !self.base_url.contains("api.openai.com"))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Identity {
     /// 16 hex chars.
