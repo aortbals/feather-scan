@@ -13,13 +13,19 @@ pub struct Rgb {
 
 pub fn decode(jpeg: &[u8]) -> Result<Rgb> {
     let mut d = jpeg_decoder::Decoder::new(jpeg);
-    let px = d.decode().map_err(|e| Error::Protocol(format!("JPEG decode: {e}")))?;
+    let px = d
+        .decode()
+        .map_err(|e| Error::Protocol(format!("JPEG decode: {e}")))?;
     let info = d.info().ok_or_else(|| Error::Protocol("bad JPEG".into()))?;
     let (w, h) = (info.width as usize, info.height as usize);
     let px = match info.pixel_format {
         jpeg_decoder::PixelFormat::RGB24 => px,
         jpeg_decoder::PixelFormat::L8 => px.iter().flat_map(|&v| [v, v, v]).collect(),
-        f => return Err(Error::Protocol(format!("unsupported JPEG pixel format {f:?}"))),
+        f => {
+            return Err(Error::Protocol(format!(
+                "unsupported JPEG pixel format {f:?}"
+            )));
+        }
     };
     Ok(Rgb { w, h, px })
 }
@@ -30,8 +36,13 @@ pub fn encode(img: &Rgb, dpi: u16) -> Result<Vec<u8>> {
     // No chroma subsampling: keeps colored text sharp.
     enc.set_sampling_factor(jpeg_encoder::SamplingFactor::F_1_1);
     enc.set_density(jpeg_encoder::Density::Inch { x: dpi, y: dpi });
-    enc.encode(&img.px, img.w as u16, img.h as u16, jpeg_encoder::ColorType::Rgb)
-        .map_err(|e| Error::Protocol(format!("JPEG encode: {e}")))?;
+    enc.encode(
+        &img.px,
+        img.w as u16,
+        img.h as u16,
+        jpeg_encoder::ColorType::Rgb,
+    )
+    .map_err(|e| Error::Protocol(format!("JPEG encode: {e}")))?;
     Ok(out)
 }
 
@@ -132,14 +143,19 @@ pub fn clean(img: &mut Rgb) {
             n += 1;
         }
     }
-    let white: [f32; 3] = std::array::from_fn(|c| (hist_percentile(&hists[c], n, 0.9) as f32).max(64.0));
+    let white: [f32; 3] =
+        std::array::from_fn(|c| (hist_percentile(&hists[c], n, 0.9) as f32).max(64.0));
 
     // 3. Tone curve: paper and faint specks → white, ink a little darker.
     let black = 24.0f32;
     let lut: [[u8; 256]; 3] = std::array::from_fn(|c| {
         std::array::from_fn(|v| {
             let x = ((v as f32 - black) / (white[c] - black)).clamp(0.0, 1.0);
-            let x = if x >= 0.92 { 1.0 } else { (x / 0.92).powf(1.35) };
+            let x = if x >= 0.92 {
+                1.0
+            } else {
+                (x / 0.92).powf(1.35)
+            };
             (x * 255.0 + 0.5) as u8
         })
     });
@@ -213,7 +229,9 @@ fn sharpen(img: &mut Rgb, amount: f32) {
                 let mut s = 0u32;
                 for dy in [-1isize, 0, 1] {
                     let row = ((y as isize + dy) as usize * w) * 3;
-                    s += src[row + (x - 1) * 3 + c] as u32 + src[row + x * 3 + c] as u32 + src[row + (x + 1) * 3 + c] as u32;
+                    s += src[row + (x - 1) * 3 + c] as u32
+                        + src[row + x * 3 + c] as u32
+                        + src[row + (x + 1) * 3 + c] as u32;
                 }
                 let blur = s as f32 / 9.0;
                 let v = src[i + c] as f32;

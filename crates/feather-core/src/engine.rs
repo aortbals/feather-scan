@@ -232,11 +232,9 @@ impl Session {
                 },
                 Err(Error::Config(m)) => self.status(State::NotPaired, m, None),
                 // Normal when the scanner sleeps; it reconnects on its own once woken.
-                Err(Error::NotFound) => self.status(
-                    State::Offline,
-                    "Scanner asleep — wake it to connect",
-                    None,
-                ),
+                Err(Error::NotFound) => {
+                    self.status(State::Offline, "Scanner asleep — wake it to connect", None)
+                }
                 Err(e) => self.status(State::Offline, e.to_string(), None),
             }
             // Wait before retrying, but stay responsive to commands.
@@ -693,9 +691,20 @@ impl Session {
             } else {
                 settings.dpi as f64
             };
-            let back = sheet.back.map(|b| ScannedImage { jpeg: b, dpi, back: true });
+            let back = sheet.back.map(|b| ScannedImage {
+                jpeg: b,
+                dpi,
+                back: true,
+            });
             images += 1 + back.is_some() as usize;
-            batch.add_sheet(ScannedImage { jpeg: sheet.front, dpi, back: false }, back);
+            batch.add_sheet(
+                ScannedImage {
+                    jpeg: sheet.front,
+                    dpi,
+                    back: false,
+                },
+                back,
+            );
             sink(Event::Page { sheets });
         });
         let flow = match &result {

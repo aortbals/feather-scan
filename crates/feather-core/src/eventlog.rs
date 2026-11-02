@@ -22,12 +22,23 @@ pub fn wrap(sink: EventSink) -> EventSink {
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_BYTES) {
         let _ = std::fs::rename(&path, path.with_extension("log.old"));
     }
-    let file = std::fs::OpenOptions::new().create(true).append(true).open(&path).ok().map(Mutex::new);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()
+        .map(Mutex::new);
     let file = Arc::new(file);
     Arc::new(move |e: Event| {
         if let Some(f) = file.as_ref() {
-            let ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-            let line = format!("{{\"t\":{ms},\"event\":{}}}\n", serde_json::to_string(&e).unwrap_or_default());
+            let ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let line = format!(
+                "{{\"t\":{ms},\"event\":{}}}\n",
+                serde_json::to_string(&e).unwrap_or_default()
+            );
             if let Ok(mut f) = f.lock() {
                 let _ = f.write_all(line.as_bytes());
             }

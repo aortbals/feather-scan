@@ -87,10 +87,15 @@ impl Batch {
         let (job_tx, job_rx) = std::sync::mpsc::channel::<(usize, ScannedImage, Analysis)>();
         let job_rx = std::sync::Arc::new(std::sync::Mutex::new(job_rx));
         let (res_tx, results) = std::sync::mpsc::channel::<Slot>();
-        let n = std::env::var("FEATHER_OCR_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(2usize).max(1);
+        let n = std::env::var("FEATHER_OCR_THREADS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2usize)
+            .max(1);
         let workers = (0..n)
             .map(|_| {
-                let (job_rx, res_tx, cfg, engine) = (job_rx.clone(), res_tx.clone(), cfg.clone(), engine.clone());
+                let (job_rx, res_tx, cfg, engine) =
+                    (job_rx.clone(), res_tx.clone(), cfg.clone(), engine.clone());
                 std::thread::spawn(move || {
                     prioritize_current_thread();
                     loop {
@@ -121,7 +126,10 @@ impl Batch {
         let t = Instant::now();
         let mut sides = vec![front];
         sides.extend(back);
-        let analyses: Result<Vec<Analysis>> = sides.iter().map(|s| imaging::analyze(&s.jpeg, s.dpi)).collect();
+        let analyses: Result<Vec<Analysis>> = sides
+            .iter()
+            .map(|s| imaging::analyze(&s.jpeg, s.dpi))
+            .collect();
         let mut analyses = match analyses {
             Ok(a) => a,
             Err(e) => {
@@ -131,13 +139,14 @@ impl Batch {
         };
         // Front and back are the same sheet: if edges were found on only one side, reuse them.
         if let [a, b] = analyses.as_mut_slice()
-            && (a.geometry.img_w, a.geometry.img_h) == (b.geometry.img_w, b.geometry.img_h) {
-                if a.geometry.detected && !b.geometry.detected {
-                    b.geometry = a.geometry.mirrored();
-                } else if b.geometry.detected && !a.geometry.detected {
-                    a.geometry = b.geometry.mirrored();
-                }
+            && (a.geometry.img_w, a.geometry.img_h) == (b.geometry.img_w, b.geometry.img_h)
+        {
+            if a.geometry.detected && !b.geometry.detected {
+                b.geometry = a.geometry.mirrored();
+            } else if b.geometry.detected && !a.geometry.detected {
+                a.geometry = b.geometry.mirrored();
             }
+        }
         self.analyze_ms += t.elapsed().as_millis() as u64;
         for (img, analysis) in sides.into_iter().zip(analyses) {
             let i = self.backs.len();
@@ -156,7 +165,10 @@ impl Batch {
     pub fn finish(mut self) -> Result<Saved> {
         prioritize_current_thread();
         let finishing = Instant::now();
-        let mut timings = Timings { analyze_ms: self.analyze_ms, ..Default::default() };
+        let mut timings = Timings {
+            analyze_ms: self.analyze_ms,
+            ..Default::default()
+        };
         drop(self.jobs.take());
         let n = self.backs.len();
         let mut slots: Vec<Option<Result<Processed>>> = (0..n).map(|_| None).collect();
@@ -171,7 +183,9 @@ impl Batch {
         }
         let mut pages = Vec::with_capacity(n);
         for s in slots {
-            pages.push(s.ok_or_else(|| crate::error::Error::Protocol("a page was not processed".into()))??);
+            pages.push(s.ok_or_else(|| {
+                crate::error::Error::Protocol("a page was not processed".into())
+            })??);
         }
         // Time spent waiting for pages after the last sheet arrived.
         timings.pages_ms = finishing.elapsed().as_millis() as u64;
@@ -188,11 +202,19 @@ impl Batch {
 }
 
 /// Processes already-scanned images (fronts and backs in order) in one go.
-pub fn process(images: Vec<ScannedImage>, cfg: &Config, engine: std::sync::Arc<dyn OcrEngine>) -> Result<Saved> {
+pub fn process(
+    images: Vec<ScannedImage>,
+    cfg: &Config,
+    engine: std::sync::Arc<dyn OcrEngine>,
+) -> Result<Saved> {
     let mut batch = Batch::new(cfg.clone(), engine);
     let mut it = images.into_iter().peekable();
     while let Some(front) = it.next() {
-        let back = if it.peek().is_some_and(|n| n.back) { it.next() } else { None };
+        let back = if it.peek().is_some_and(|n| n.back) {
+            it.next()
+        } else {
+            None
+        };
         batch.add_sheet(front, back);
     }
     batch.finish()
@@ -221,7 +243,11 @@ fn write_document(
     let t = Instant::now();
     let now = local_now();
     let today = now.date();
-    let text: String = pages.iter().map(|p| p.ocr.text()).collect::<Vec<_>>().join("\n\n");
+    let text: String = pages
+        .iter()
+        .map(|p| p.ocr.text())
+        .collect::<Vec<_>>()
+        .join("\n\n");
     let fallback = format!("{} Scan", now.stamp());
     let (title, title_error) = if cfg.llm.enabled {
         match crate::title::generate(&cfg.llm, &text, &today) {
@@ -235,9 +261,21 @@ fn write_document(
 
     // Write it.
     let t = Instant::now();
-    let pdf_pages: Vec<PdfPage> =
-        pages.into_iter().map(|p| PdfPage { jpeg: p.jpeg, geometry: p.geometry, ocr: p.ocr }).collect();
-    let bytes = pdf::write_pdf(&pdf_pages, &Metadata { title: Some(title.clone()), created: now.pdf_date() });
+    let pdf_pages: Vec<PdfPage> = pages
+        .into_iter()
+        .map(|p| PdfPage {
+            jpeg: p.jpeg,
+            geometry: p.geometry,
+            ocr: p.ocr,
+        })
+        .collect();
+    let bytes = pdf::write_pdf(
+        &pdf_pages,
+        &Metadata {
+            title: Some(title.clone()),
+            created: now.pdf_date(),
+        },
+    );
     std::fs::create_dir_all(&cfg.output_dir)?;
     let path = unique_path(&cfg.output_dir, &title);
     let tmp = path.with_extension("pdf.part");
@@ -245,15 +283,31 @@ fn write_document(
     std::fs::rename(&tmp, &path)?;
     timings.write_ms = t.elapsed().as_millis() as u64;
     timings.total_ms = finishing.elapsed().as_millis() as u64;
-    Ok(Saved { path, title, pages: pdf_pages.len(), removed_blank: removed, title_error, timings })
+    Ok(Saved {
+        path,
+        title,
+        pages: pdf_pages.len(),
+        removed_blank: removed,
+        title_error,
+        timings,
+    })
 }
 
-fn process_one(img: &ScannedImage, analysis: &Analysis, cfg: &Config, engine: &dyn OcrEngine) -> Result<Processed> {
+fn process_one(
+    img: &ScannedImage,
+    analysis: &Analysis,
+    cfg: &Config,
+    engine: &dyn OcrEngine,
+) -> Result<Processed> {
     let skip_ocr = analysis.blank && img.back;
     if !cfg.clean_pages {
         // Keep the scanner's JPEG untouched; crop and deskew happen in the PDF.
         let t = Instant::now();
-        let ocr = if skip_ocr { OcrPage::default() } else { ocr::recognize_oriented(engine, &img.jpeg)? };
+        let ocr = if skip_ocr {
+            OcrPage::default()
+        } else {
+            ocr::recognize_oriented(engine, &img.jpeg)?
+        };
         return Ok(Processed {
             jpeg: img.jpeg.clone(),
             geometry: analysis.geometry,
@@ -276,7 +330,11 @@ fn process_one(img: &ScannedImage, analysis: &Analysis, cfg: &Config, engine: &d
     let dpi = img.dpi.round() as u16;
     let mut jpeg = enhance::encode(&page, dpi)?;
     let t_encode = t.elapsed();
-    let mut ocr = if skip_ocr { OcrPage::default() } else { ocr::recognize_oriented(engine, &jpeg)? };
+    let mut ocr = if skip_ocr {
+        OcrPage::default()
+    } else {
+        ocr::recognize_oriented(engine, &jpeg)?
+    };
     if debug {
         eprintln!(
             "page: decode {:?} crop {:?} clean {:?} encode {:?} ocr {:?} upside_down={}",
@@ -308,5 +366,8 @@ fn unique_path(dir: &Path, title: &str) -> PathBuf {
     if !first.exists() {
         return first;
     }
-    (2..).map(|i| dir.join(format!("{title} ({i}).pdf"))).find(|p| !p.exists()).unwrap()
+    (2..)
+        .map(|i| dir.join(format!("{title} ({i}).pdf")))
+        .find(|p| !p.exists())
+        .unwrap()
 }

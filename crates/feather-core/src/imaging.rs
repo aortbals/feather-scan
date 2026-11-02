@@ -86,7 +86,9 @@ fn decode_small(jpeg: &[u8]) -> Result<(Gray, usize, usize)> {
     let gray = match info.pixel_format {
         jpeg_decoder::PixelFormat::L8 => px,
         jpeg_decoder::PixelFormat::RGB24 => px
-            .as_chunks::<3>().0.iter()
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|c| ((c[0] as u32 * 77 + c[1] as u32 * 150 + c[2] as u32 * 29) >> 8) as u8)
             .collect(),
         f => {
@@ -169,11 +171,15 @@ fn find_edges_by_shadow(g: &Gray) -> Option<Edges> {
     }
     let avg_row = |y: usize| -> Vec<f64> {
         let (y0, y1) = (y.saturating_sub(1), (y + 1).min(h - 1));
-        (0..w).map(|x| (y0..=y1).map(|yy| g.at(x, yy) as f64).sum::<f64>() / (y1 - y0 + 1) as f64).collect()
+        (0..w)
+            .map(|x| (y0..=y1).map(|yy| g.at(x, yy) as f64).sum::<f64>() / (y1 - y0 + 1) as f64)
+            .collect()
     };
     let avg_col = |x: usize| -> Vec<f64> {
         let (x0, x1) = (x.saturating_sub(1), (x + 1).min(w - 1));
-        (0..h).map(|y| (x0..=x1).map(|xx| g.at(xx, y) as f64).sum::<f64>() / (x1 - x0 + 1) as f64).collect()
+        (0..h)
+            .map(|y| (x0..=x1).map(|xx| g.at(xx, y) as f64).sum::<f64>() / (x1 - x0 + 1) as f64)
+            .collect()
     };
     let mut left = Vec::new();
     let mut right = Vec::new();
@@ -203,7 +209,10 @@ fn find_edges_by_shadow(g: &Gray) -> Option<Edges> {
     if rm - lm < w as f64 * 0.3 {
         return None;
     }
-    let (x0, x1) = ((lm + (rm - lm) * 0.06) as usize, (rm - (rm - lm) * 0.06) as usize);
+    let (x0, x1) = (
+        (lm + (rm - lm) * 0.06) as usize,
+        (rm - (rm - lm) * 0.06) as usize,
+    );
     let mut top = Vec::new();
     let mut bottom = Vec::new();
     for x in (x0..x1).step_by(3) {
@@ -216,14 +225,24 @@ fn find_edges_by_shadow(g: &Gray) -> Option<Edges> {
         }
     }
     let xm = (lm + rm) / 2.0;
-    let topm = robust_line(&mut top).map(|(a, b)| a * xm + b).unwrap_or(0.0).max(0.0);
-    let botm = robust_line(&mut bottom).map(|(a, b)| a * xm + b).unwrap_or(h as f64).min(h as f64);
+    let topm = robust_line(&mut top)
+        .map(|(a, b)| a * xm + b)
+        .unwrap_or(0.0)
+        .max(0.0);
+    let botm = robust_line(&mut bottom)
+        .map(|(a, b)| a * xm + b)
+        .unwrap_or(h as f64)
+        .min(h as f64);
     // Edge positions where they cross the paper's center lines.
     let ymid = (topm + botm) / 2.0;
     let (left_mid, right_mid) = (al * ymid + bl, ar * ymid + br);
     let inner: Vec<u8> = (topm as usize..botm as usize)
         .step_by(5)
-        .flat_map(|y| (left_mid.max(0.0) as usize..(right_mid as usize).min(w)).step_by(5).map(move |x| (x, y)))
+        .flat_map(|y| {
+            (left_mid.max(0.0) as usize..(right_mid as usize).min(w))
+                .step_by(5)
+                .map(move |x| (x, y))
+        })
         .map(|(x, y)| g.at(x, y))
         .collect();
     let paper = p90(inner.into_iter());
@@ -262,9 +281,9 @@ fn robust_line(pts: &mut Vec<(f64, f64)>) -> Option<(f64, f64)> {
         let n = pts.len() as f64;
         let (sy, sx) = pts.iter().fold((0.0, 0.0), |a, p| (a.0 + p.0, a.1 + p.1));
         let (my, mx) = (sy / n, sx / n);
-        let (num, den) = pts
-            .iter()
-            .fold((0.0, 0.0), |a, p| (a.0 + (p.0 - my) * (p.1 - mx), a.1 + (p.0 - my).powi(2)));
+        let (num, den) = pts.iter().fold((0.0, 0.0), |a, p| {
+            (a.0 + (p.0 - my) * (p.1 - mx), a.1 + (p.0 - my).powi(2))
+        });
         (den > 0.0).then(|| (num / den, mx - num / den * my))
     };
     for _ in 0..4 {

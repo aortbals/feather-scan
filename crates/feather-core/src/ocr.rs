@@ -66,14 +66,19 @@ pub trait OcrEngine: Send + Sync {
 pub fn recognize_oriented(engine: &dyn OcrEngine, jpeg: &[u8]) -> Result<OcrPage> {
     // One retry covers a request cancelled by the watchdog; after that the page
     // is saved without a text layer rather than failing the whole document.
-    let up = match engine.recognize(jpeg, false).or_else(|_| engine.recognize(jpeg, false)) {
+    let up = match engine
+        .recognize(jpeg, false)
+        .or_else(|_| engine.recognize(jpeg, false))
+    {
         Ok(p) => p,
         Err(_) => return Ok(OcrPage::default()),
     };
     if up.confidence >= 0.6 && up.score() > 40.0 {
         return Ok(up);
     }
-    let Ok(down) = engine.recognize(jpeg, true) else { return Ok(up) };
+    let Ok(down) = engine.recognize(jpeg, true) else {
+        return Ok(up);
+    };
     Ok(if down.score() > up.score() * 1.5 {
         down
     } else {

@@ -96,9 +96,10 @@ pub fn discover(target: Option<Ipv4Addr>, wait: Duration) -> Result<Vec<ScannerI
         sock.set_read_timeout(Some(left.max(Duration::from_millis(1))))?;
         if let Ok((n, std::net::SocketAddr::V4(from))) = sock.recv_from(&mut buf)
             && let Some(info) = parse_reply(&buf[..n], *from.ip())
-                && !found.iter().any(|f| f.ip == info.ip) {
-                    found.push(info);
-                }
+            && !found.iter().any(|f| f.ip == info.ip)
+        {
+            found.push(info);
+        }
     }
     Ok(found)
 }
