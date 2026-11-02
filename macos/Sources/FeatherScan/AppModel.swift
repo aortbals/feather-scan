@@ -42,10 +42,8 @@ final class AppModel: ObservableObject {
     }
 
     @Published private(set) var menuBarIcon = FeatherIcon.still(dimmed: true)
-    private var iconTimer: Timer?
     /// Held while a scan runs, so macOS doesn't nap or sleep the app mid-job.
     private var workToken: NSObjectProtocol?
-    private var iconFrame = 0
 
     /// A scan is feeding paper or its PDF is being made.
     private var isWorking: Bool { state == .scanning || activity != nil }
@@ -59,22 +57,11 @@ final class AppModel: ObservableObject {
             ProcessInfo.processInfo.endActivity(token)
             workToken = nil
         }
-        if isWorking {
-            guard iconTimer == nil else { return }
-            iconTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 12, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    guard let self else { return }
-                    let frames = FeatherIcon.scanningFrames
-                    self.iconFrame = (self.iconFrame + 1) % frames.count
-                    self.menuBarIcon = frames[self.iconFrame]
-                }
-            }
-        } else {
-            iconTimer?.invalidate()
-            iconTimer = nil
-            iconFrame = 0
-            menuBarIcon = FeatherIcon.still(dimmed: state != .ready)
-        }
+        // The label stays a static image; the shimmer is a Core Animation effect on
+        // the status item's button, so it costs almost nothing while it runs.
+        let still = FeatherIcon.still(dimmed: state != .ready && !isWorking)
+        if still !== menuBarIcon { menuBarIcon = still }
+        if isWorking { MenuBarShimmer.start() } else { MenuBarShimmer.stop() }
     }
 
     var isReady: Bool { state == .ready }

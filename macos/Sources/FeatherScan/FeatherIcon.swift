@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 
 /// The menu bar feather, drawn in code as a template image so it follows the
 /// menu bar's light/dark appearance.
@@ -7,28 +8,28 @@ enum FeatherIcon {
 
     /// Resting feather. `dimmed` is used while offline.
     static func still(dimmed: Bool = false) -> NSImage {
-        image { _ in dimmed ? 0.4 : 1 }
+        dimmed ? stillDimmed : stillNormal
     }
 
-    /// Frames of a shimmer for while a scan runs: the feather dims a little and
-    /// a soft band of light sweeps from the quill to the tip, then rests.
-    static let scanningFrames: [NSImage] = {
-        let sweep = 14, rest = 6
-        let base = 0.45
-        return (0..<(sweep + rest)).map { i in
-            guard i < sweep else { return image { _ in base } }
-            // Band center travels from below the quill to past the tip.
-            let center = -0.3 + 1.6 * Double(i) / Double(sweep - 1)
-            return image { y in base + (1 - base) * exp(-pow((y - center) / 0.2, 2)) }
-        }
-    }()
+    private static let stillNormal = image { _ in 1 }
+    private static let stillDimmed = image { _ in 0.4 }
 
-    /// Draws the feather with opacity given per point along its length
-    /// (`opacity(y)`, y = 0 at the quill, 1 at the tip).
-    private static func image(opacity: @escaping (Double) -> Double) -> NSImage {
-        let img = NSImage(size: size, flipped: false) { rect in
-            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
-            ctx.translateBy(x: rect.midX, y: rect.midY)
+    /// Renders the feather once into 1x and 2x bitmaps, which are cheap to show
+    /// (a drawing-handler image would re-render every time the menu bar draws it).
+    /// `opacity(y)` sets the opacity along the feather (y = 0 at the quill, 1 at the tip).
+    private static func image(opacity: (Double) -> Double) -> NSImage {
+        let img = NSImage(size: size)
+        for scale in [1, 2] {
+            let px = Int(size.width) * scale
+            let rep = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: px, pixelsHigh: px, bitsPerSample: 8, samplesPerPixel: 4,
+                hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+            rep.size = size
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+            let ctx = NSGraphicsContext.current!.cgContext
+            ctx.scaleBy(x: CGFloat(scale), y: CGFloat(scale))
+            ctx.translateBy(x: size.width / 2, y: size.height / 2)
             // The quill leans to the right, like a pen.
             ctx.rotate(by: tilt)
             ctx.scaleBy(x: 18, y: 18)
@@ -50,7 +51,8 @@ enum FeatherIcon {
                                        options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
             }
             ctx.endTransparencyLayer()
-            return true
+            NSGraphicsContext.restoreGraphicsState()
+            img.addRepresentation(rep)
         }
         img.isTemplate = true
         img.accessibilityDescription = "Feather Scan"
@@ -103,5 +105,62 @@ enum FeatherIcon {
         ctx.addLine(to: shaft.to)
         ctx.strokePath()
         ctx.setBlendMode(.normal)
+    }
+}
+
+/// The scanning shimmer: a gradient mask on the menu bar item's button that dims
+/// the feather and sweeps a band of full opacity from the quill to the tip.
+/// Core Animation renders it outside the app, so it doesn't wake the app per frame.
+///
+/// SwiftUI's MenuBarExtra has no API for its NSStatusItem, so the button is found
+/// in the app's status bar window (the approach MenuBarExtraAccess uses).
+@MainActor
+enum MenuBarShimmer {
+    private static let key = "featherShimmer"
+
+    static func start() {
+        guard let layer = statusButton()?.layer, layer.mask?.animation(forKey: key) == nil else { return }
+        let mask = CAGradientLayer()
+        mask.frame = layer.bounds
+        let dim = NSColor(white: 0, alpha: 0.45).cgColor
+        mask.colors = [dim, NSColor.black.cgColor, dim]
+        // Quill at the bottom left, tip at the top right.
+        mask.startPoint = CGPoint(x: 0, y: 0)
+        mask.endPoint = CGPoint(x: 1, y: 1)
+        mask.locations = [-0.25, -0.05, 0.15]
+        let sweep = CABasicAnimation(keyPath: "locations")
+        sweep.fromValue = [-0.25, -0.05, 0.15]
+        sweep.toValue = [0.85, 1.05, 1.25]
+        sweep.duration = 1.3
+        sweep.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        let cycle = CAAnimationGroup()
+        cycle.animations = [sweep]
+        cycle.duration = 1.9  // 1.3 s sweep, 0.6 s rest
+        cycle.repeatCount = .infinity
+        mask.add(cycle, forKey: key)
+        layer.mask = mask
+    }
+
+    static func stop() {
+        statusButton()?.layer?.mask = nil
+    }
+
+    private static func statusButton() -> NSButton? {
+        for window in NSApp.windows where String(describing: type(of: window)).contains("NSStatusBarWindow") {
+            if let button = findButton(in: window.contentView) {
+                button.wantsLayer = true
+                return button
+            }
+        }
+        return nil
+    }
+
+    private static func findButton(in view: NSView?) -> NSButton? {
+        guard let view else { return nil }
+        if let b = view as? NSButton { return b }
+        for sub in view.subviews {
+            if let b = findButton(in: sub) { return b }
+        }
+        return nil
     }
 }
